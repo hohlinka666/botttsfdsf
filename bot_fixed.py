@@ -22,7 +22,10 @@ from dotenv import load_dotenv
 # Вся админка (/opcaadmin), команды, ранги, отчёты, рассылки, CSV, статистика — в teams.py.
 # Старых админ-хендлеров (/admin, admin:* и т.п.) здесь больше нет.
 from teams import (
-    application_admin_kb, claim_username_invites, handle_start_payload, init_team_db, setup_teams, who,
+    ADDER_RANKS, BTN_ADMIN, BTN_HELP, BTN_PROFILE, BTN_REPORT, BTN_TEAM, BTN_TOP,
+    application_admin_kb, claim_username_invites, count_pending_apps, count_pending_reports,
+    count_pending_team_requests, handle_start_payload, init_team_db, latest_team_request, rank_label,
+    setup_teams, today_line, who,
 )
 
 load_dotenv()
@@ -178,21 +181,40 @@ BTN_OPERATOR = "🎧 Оператор чата"
 BTN_SCOUT = "🔎 Скаут моделей"
 BTN_MODEL = "📸 Модель"
 BTN_ABOUT = "ℹ️ О проекте"
-BTN_PROFILE = "👤 Профиль"  # обрабатывается в teams.py
+BTN_APPS = "📋 Мои заявки"
 BTN_APP = "📱 Кабинет"
 
 
-def main_kb():
-    last = [KeyboardButton(text=BTN_PROFILE)]
-    if WEBAPP_URL:
-        last.append(KeyboardButton(text=BTN_APP))
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_OPERATOR), KeyboardButton(text=BTN_SCOUT)],
-            [KeyboardButton(text=BTN_MODEL), KeyboardButton(text=BTN_ABOUT)],
-            last,
-        ], resize_keyboard=True
-    )
+def user_rank(user_id):
+    """Ранг участника (scout/operator/…) или None, если человек ещё не в команде."""
+    if not user_id:
+        return None
+    try:
+        row = get_user(user_id)
+        return row["rank"] if row else None
+    except (sqlite3.Error, IndexError, KeyError):
+        return None
+
+
+def main_kb(user_id=None):
+    """Меню зависит от того, кто его видит: гость выбирает путь, участник — работает, админ — управляет."""
+    kb = []
+    is_adm = user_id in ADMIN_IDS
+    if user_rank(user_id):
+        kb.append([KeyboardButton(text=BTN_REPORT), KeyboardButton(text=BTN_PROFILE)])
+        kb.append([KeyboardButton(text=BTN_TEAM), KeyboardButton(text=BTN_TOP)])
+    else:
+        if is_adm:
+            kb.append([KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_TOP)])
+        else:
+            kb.append([KeyboardButton(text=BTN_OPERATOR), KeyboardButton(text=BTN_SCOUT)])
+            kb.append([KeyboardButton(text=BTN_MODEL), KeyboardButton(text=BTN_APPS)])
+    tail = [KeyboardButton(text=BTN_APP)] if WEBAPP_URL else [KeyboardButton(text=BTN_ABOUT)]
+    tail.append(KeyboardButton(text=BTN_HELP))
+    kb.append(tail)
+    if is_adm:
+        kb.insert(0, [KeyboardButton(text=BTN_ADMIN)])
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, input_field_placeholder="Выберите действие")
 
 
 def webapp_kb():
@@ -262,19 +284,36 @@ ABOUT_TEXT = (
     "Новости и объявления — в нашем канале."
 )
 
-HELP_TEXT = (
-    "📖 <b>Команды</b>\n\n"
-    "/start — главное меню\n"
-    "/profile — профиль, ранг, статистика\n"
-    "/report — составить отчёт за сегодня\n"
-    "/top — рейтинг за 7 дней\n"
-    "/addworker — добавить работника в команду (скауты и тимлиды)\n"
-    "/requestteam — запросить создание новой команды\n"
-    "/app — мини-приложение (кабинет)\n"
-    "/status — статус моих заявок\n"
-    "/cancel — отменить текущее действие\n"
-    "/help — эта справка"
-)
+def help_text(user_id: int) -> str:
+    rank = user_rank(user_id)
+    L = ["📖 <b>Как пользоваться ботом</b>", ""]
+    if rank:
+        L += [
+            "<b>Каждый день</b>",
+            f"{BTN_REPORT} (/report) — сдать отчёт: часы и сколько людей привели. Кнопки со значениями — в один тап.",
+            f"{BTN_PROFILE} (/profile) — ваш ранг, статистика, статус отчёта за сегодня, «Мои отчёты».",
+            "",
+            "<b>Команда</b>",
+            f"{BTN_TEAM} (/team) — состав, ссылка для вступления, кто не сдал отчёт.",
+        ]
+        if rank in ADDER_RANKS:
+            L.append("➕ /addworker — добавить человека в команду; 🙋 /requestteam — запросить свою команду.")
+        L.append(f"{BTN_TOP} (/top) — рейтинг за 7 дней.")
+    else:
+        L += [
+            "<b>Как начать работать</b>",
+            f"1. Выберите, кем хотите быть: «{BTN_OPERATOR}» или «{BTN_SCOUT}», и ответьте на несколько вопросов.",
+            f"2. Следите за статусом в «{BTN_APPS}» (/status) — я напишу, когда заявку рассмотрят.",
+            "3. Если вас пригласил наставник — просто перейдите по его ссылке, заявка не нужна.",
+            f"Хотите в модели — раздел «{BTN_MODEL}».",
+        ]
+    L += ["", "<b>Прочее</b>", "/menu — вернуть кнопки меню", "/cancel — отменить текущее действие"]
+    if WEBAPP_URL:
+        L.append(f"{BTN_APP} (/app) — то же самое в удобном приложении")
+    if user_id in ADMIN_IDS:
+        L += ["", f"🛠 {BTN_ADMIN} (/opcaadmin) — очереди, команды, рассылки"]
+    return "\n".join(L)
+
 
 main_router = Router(name="main")
 main_router.message.filter(F.chat.type == "private")
@@ -310,11 +349,23 @@ async def gate(message: Message, payload: str = "") -> bool:
 
 
 async def welcome(message: Message, user):
+    """Приветствие под роль: гость — с чего начать, участник — что сегодня, админ — что ждёт решения."""
+    uid = user.id
     name = esc(user.first_name or "друг")
-    await message.answer(
-        f"👋 Привет, <b>{name}</b>!\n\n"
-        f"Выберите, кем вы хотите стать в нашей команде, или откройте профиль.",
-        reply_markup=main_kb())
+    rank = user_rank(uid)
+    if rank:
+        row = get_user(uid)
+        text = (f"👋 С возвращением, <b>{name}</b>!\n"
+                f"🏅 {esc(rank_label(row['rank'], row['level']))}\n\n{today_line(uid)}")
+    else:
+        text = (f"👋 Привет, <b>{name}</b>!\n\nМы набираем операторов чатов и скаутов моделей. "
+                f"Выберите, кем хотите стать — ответить нужно на несколько вопросов.\n"
+                f"Пригласил наставник? Просто перейдите по его ссылке.")
+    if uid in ADMIN_IDS:
+        n_rep, n_app, n_req = count_pending_reports(), count_pending_apps(), count_pending_team_requests()
+        pend = [f"{t} {n}" for t, n in (("🧾 отчётов", n_rep), ("📥 заявок", n_app), ("🙋 запросов команд", n_req)) if n]
+        text += "\n\n🛠 Ждёт решения: " + (" · ".join(pend) if pend else "ничего, всё разобрано ✅")
+    await message.answer(text, reply_markup=main_kb(uid))
 
 
 # -------------------- /start, /help, подписка --------------------
@@ -355,11 +406,10 @@ async def cb_check_sub(cb: CallbackQuery, state: FSMContext):
 
 
 @main_router.message(Command("help"))
-async def cmd_help(message: Message):
-    text = HELP_TEXT
-    if message.from_user.id in ADMIN_IDS:
-        text += "\n\n🛠 /opcaadmin — админ-панель"
-    await message.answer(text)
+@main_router.message(F.text == BTN_HELP)
+async def cmd_help(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(help_text(message.from_user.id), reply_markup=main_kb(message.from_user.id))
 
 
 @main_router.message(Command("app"))
@@ -371,20 +421,20 @@ async def cmd_app(message: Message, state: FSMContext):
     if not WEBAPP_URL:
         await message.answer("Мини-приложение пока не подключено.")
         return
-    await message.answer("Кабинет: профиль, отчёты со статусами и рейтинг.", reply_markup=webapp_kb())
+    await message.answer("📱 Кабинет: профиль, отчёты со статусами и рейтинг — всё в одном окне.",
+                         reply_markup=webapp_kb())
 
 
 @main_router.message(Command("menu"))
 async def cmd_menu(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Главное меню 👇", reply_markup=main_kb())
+    await message.answer("Главное меню 👇", reply_markup=main_kb(message.from_user.id))
 
 
-@main_router.message(Command("status"))
-async def cmd_status(message: Message):
-    uid = message.from_user.id
+def apps_overview(uid: int):
+    """Текст и кнопки раздела «Мои заявки»: что подано, в каком статусе и что можно подать ещё."""
     lines = ["📋 <b>Мои заявки</b>", ""]
-    found = False
+    rows, found = [], False
     for kind, info in KIND_INFO.items():
         a = application_for(uid, kind)
         if a:
@@ -394,9 +444,38 @@ async def cmd_status(message: Message):
     if u and u["model_interest"]:
         found = True
         lines.append("Модель: ✅ интерес передан менеджеру")
+    req = latest_team_request(uid)
+    if req:
+        found = True
+        lines.append(f"Команда «{esc(req['name'])}»: {STATUS_TITLES.get(req['status'], req['status'])}")
     if not found:
-        lines.append("Пока заявок нет. Выберите раздел в меню 👇")
-    await message.answer("\n".join(lines), reply_markup=main_kb())
+        lines.append("Пока ничего не подано. Выберите, с чего начать 👇")
+    elif any(application_for(uid, k) and application_for(uid, k)["status"] == "pending" for k in KIND_INFO):
+        lines += ["", "Заявки рассматриваются вручную — как только решат, я напишу сюда."]
+    for kind, info in KIND_INFO.items():
+        if not application_for(uid, kind):
+            rows.append([InlineKeyboardButton(text=f"📝 Подать заявку: {info['title']}", callback_data=f"apply:{kind}")])
+    if not (u and u["model_interest"]):
+        rows.append([InlineKeyboardButton(text="📸 Хочу в модели", callback_data="model:interest")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@main_router.message(Command("status"))
+@main_router.message(F.text == BTN_APPS)
+async def cmd_status(message: Message, state: FSMContext):
+    await state.clear()
+    text, markup = apps_overview(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@main_router.callback_query(F.data == "my:apps")
+async def cb_my_apps(cb: CallbackQuery):
+    text, markup = apps_overview(cb.from_user.id)
+    try:
+        await cb.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest:
+        await cb.message.answer(text, reply_markup=markup)
+    await cb.answer()
 
 
 # -------------------- О проекте --------------------
@@ -406,8 +485,11 @@ async def menu_about(message: Message, state: FSMContext):
     await state.clear()
     if not await gate(message):
         return
-    await message.answer(ABOUT_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Наш канал", url=CHANNEL_URL)]]))
+    rows = [[InlineKeyboardButton(text="📢 Наш канал", url=CHANNEL_URL)]]
+    if not user_rank(message.from_user.id):
+        rows.append([InlineKeyboardButton(text="🎧 Стать оператором", callback_data="apply:operator"),
+                     InlineKeyboardButton(text="🔎 Стать скаутом", callback_data="apply:scout")])
+    await message.answer(ABOUT_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 # -------------------- Заявки: оператор / скаут --------------------
@@ -441,7 +523,26 @@ async def menu_scout(message: Message, state: FSMContext):
 
 def question_text(kind: str, idx: int) -> str:
     qs = KIND_INFO[kind]["questions"]
-    return f"<b>Вопрос {idx + 1}/{len(qs)}</b>\n{qs[idx][1]}\n\n/cancel — отмена"
+    return f"<b>Вопрос {idx + 1}/{len(qs)}</b>\n{qs[idx][1]}"
+
+
+def cancel_app_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить заявку", callback_data="apply:x")]])
+
+
+ALL_MENU_TEXTS = {BTN_OPERATOR, BTN_SCOUT, BTN_MODEL, BTN_ABOUT, BTN_APPS, BTN_APP, BTN_HELP,
+                  BTN_PROFILE, BTN_REPORT, BTN_TEAM, BTN_TOP, BTN_ADMIN}
+
+
+@main_router.callback_query(F.data == "apply:x")
+async def cb_apply_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await cb.message.edit_text("Заявка отменена. Вернуться к ней можно в любой момент — «📋 Мои заявки».")
+    except TelegramBadRequest:
+        pass
+    await cb.message.answer("Главное меню 👇", reply_markup=main_kb(cb.from_user.id))
+    await cb.answer()
 
 
 @main_router.callback_query(F.data.regexp(r"^apply:(operator|scout)$"))
@@ -457,17 +558,17 @@ async def cb_apply(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(Apply.answers)
     await state.update_data(kind=kind, idx=0, answers=[])
-    await cb.message.answer(question_text(kind, 0))
+    await cb.message.answer(question_text(kind, 0), reply_markup=cancel_app_kb())
     await cb.answer()
 
 
-@main_router.message(Apply.answers, F.text, ~F.text.startswith("/"))
+@main_router.message(Apply.answers, F.text, ~F.text.startswith("/"), ~F.text.in_(ALL_MENU_TEXTS))
 async def apply_answer(message: Message, state: FSMContext):
     data = await state.get_data()
     kind, idx, answers = data.get("kind"), data.get("idx", 0), data.get("answers", [])
     if kind not in KIND_INFO:
         await state.clear()
-        await message.answer("Сессия устарела — начните заново.", reply_markup=main_kb())
+        await message.answer("Сессия устарела — начните заново.", reply_markup=main_kb(message.from_user.id))
         return
     qs = KIND_INFO[kind]["questions"]
     key = qs[idx][0]
@@ -475,33 +576,35 @@ async def apply_answer(message: Message, state: FSMContext):
 
     if key == "age":
         if not text.isdigit() or not 10 <= int(text) <= 99:
-            await message.answer("Введите возраст числом, например 21.")
+            await message.answer("Введите возраст числом, например 21.", reply_markup=cancel_app_kb())
             return
         if int(text) < 18:
             await state.clear()
             await message.answer("К сожалению, мы работаем только с совершеннолетними (18+).",
-                                 reply_markup=main_kb())
+                                 reply_markup=main_kb(message.from_user.id))
             return
     elif not text or len(text) > 800:
-        await message.answer("Ответ должен быть от 1 до 800 символов. Попробуйте ещё раз.")
+        await message.answer("Ответ должен быть от 1 до 800 символов. Попробуйте ещё раз.",
+                             reply_markup=cancel_app_kb())
         return
 
     answers.append(f"{QUESTION_LABELS[key]}: {text}")
     idx += 1
     if idx < len(qs):
         await state.update_data(idx=idx, answers=answers)
-        await message.answer(question_text(kind, idx))
+        await message.answer(question_text(kind, idx), reply_markup=cancel_app_kb())
         return
 
     await state.clear()
     user = message.from_user
     if not add_application(user.id, kind, answers):
-        await message.answer("Заявка такого типа у вас уже есть.", reply_markup=main_kb())
+        await message.answer("Заявка такого типа у вас уже есть.", reply_markup=main_kb(user.id))
         return
     track(user.id, f"application_{kind}")
     await message.answer(
-        f"✅ Заявка «{KIND_INFO[kind]['title']}» отправлена! Мы рассмотрим её и напишем вам сюда.\n"
-        f"Статус — /status.", reply_markup=main_kb())
+        f"✅ <b>Заявка «{KIND_INFO[kind]['title']}» отправлена!</b>\n\n"
+        f"Что дальше: админ рассмотрит её вручную, а я сразу напишу вам сюда. "
+        f"Следить за статусом можно в «{BTN_APPS}».", reply_markup=main_kb(user.id))
     await notify_admins_new_app(user.id, kind)
 
 
@@ -563,7 +666,8 @@ async def cb_model_interest(cb: CallbackQuery):
 
 @fallback_router.message(StateFilter(None), F.text)
 async def fallback(message: Message):
-    await message.answer("Не понял вас 🤔 Выберите раздел в меню или откройте /help.", reply_markup=main_kb())
+    await message.answer("Не понял вас 🤔 Воспользуйтесь кнопками меню внизу или откройте «❓ Помощь».",
+                         reply_markup=main_kb(message.from_user.id))
 
 
 # -------------------- ЗАПУСК --------------------
@@ -577,6 +681,7 @@ async def set_commands():
         BotCommand(command="addworker", description="Добавить работника"),
         BotCommand(command="requestteam", description="Запросить команду"),
         BotCommand(command="app", description="Мини-приложение"),
+        BotCommand(command="team", description="Моя команда"),
         BotCommand(command="status", description="Статус моих заявок"),
         BotCommand(command="help", description="Справка"),
     ]

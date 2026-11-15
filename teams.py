@@ -559,51 +559,84 @@ async def show(target, text: str, markup=None):
         await target.answer(text, reply_markup=markup)
 
 
-def main_menu_kb():
-    return _MAIN_KB() if _MAIN_KB else None
+def main_menu_kb(uid: Optional[int] = None):
+    """Главная клавиатура зависит от того, кто смотрит (гость / участник команды / админ)."""
+    return _MAIN_KB(uid) if _MAIN_KB else None
+
+
+# Кнопки главного меню (reply-клавиатура). Тексты используются и в bot_fixed.py.
+BTN_REPORT = "📝 Отчёт"
+BTN_PROFILE = "👤 Профиль"
+BTN_TOP = "🏆 Рейтинг"
+BTN_TEAM = "👥 Команда"
+BTN_ADMIN = "🛠 Админ-панель"
+BTN_HELP = "❓ Помощь"
+# старые подписи продолжают работать (у людей может висеть прежняя клавиатура)
+MENU_TEXTS = {BTN_REPORT, BTN_PROFILE, BTN_TOP, BTN_TEAM, BTN_ADMIN, BTN_HELP}
 
 
 # -------------------- ПРОФИЛЬ --------------------
+def today_report(uid: int):
+    today = msk_now().date().isoformat()
+    with db() as con:
+        return con.execute("SELECT * FROM reports WHERE user_id=? AND report_date=?", (uid, today)).fetchone()
+
+
+def today_line(uid: int) -> str:
+    r = today_report(uid)
+    if not r:
+        return "📝 Сегодня: <b>отчёт не сдан</b>"
+    return f"📝 Сегодня: отчёт {REPORT_STATUS.get(r['status'], r['status'])}"
+
+
 def profile_text(uid: int, show_links: bool) -> str:
     u = get_user(uid)
     if not u:
         return "Пользователь не найден."
     mem = member_team(uid)
     led = teams_led_by(uid)
-    L = ["👤 <b>Профиль</b>", who(u), f"Имя: {esc(u['first_name'] or '—')}",
-         f"Ранг: <b>{esc(rank_label(u['rank'], u['level']))}</b>"]
+    L = ["👤 <b>Профиль</b>", f"{who(u)}" + (f" · {esc(u['first_name'])}" if u["first_name"] else ""), "",
+         f"🏅 Ранг: <b>{esc(rank_label(u['rank'], u['level']))}</b>"]
     if mem:
-        L.append(f"Команда: «{esc(mem['name'])}» · лидер {who(get_user(mem['leader_id']), mem['leader_id'])}")
-    else:
-        L.append("Команда: —")
+        L.append(f"👥 Команда: «{esc(mem['name'])}» · лидер {who(get_user(mem['leader_id']), mem['leader_id'])}")
+    elif not led:
+        L.append("👥 Команда: —")
     for t in led:
-        L.append(f"👑 Лидер команды «{esc(t['name'])}» ({t['members']} чел.)")
+        L.append(f"👑 Лидер команды «{esc(t['name'])}» · {t['members']} чел.")
         if show_links:
-            L.append(f"🔗 Реф. ссылка: <code>{bot_link(t['ref_code'])}</code>")
+            L.append(f"🔗 Ссылка для вступления: <code>{bot_link(t['ref_code'])}</code>")
     req = latest_team_request(uid)
     if req and req["status"] == "pending":
         L.append(f"🙋 Заявка на команду «{esc(req['name'])}»: ⏳ на рассмотрении")
-    L.append(f"Регистрация: {fmt_dt(u['created_at'])} МСК")
-    L += ["", "<b>Статистика</b>",
-          f"За всё время: {fmt_tot(user_totals(uid))}",
-          f"За 7 дней: {fmt_tot(user_totals(uid, since7()))}"]
+    if u["rank"]:
+        L += ["", today_line(uid), "", "<b>📊 Статистика</b>",
+              f"7 дней: {fmt_tot(user_totals(uid, since7()))}",
+              f"Всё время: {fmt_tot(user_totals(uid))}"]
+    L += ["", f"<i>В боте с {fmt_dt(u['created_at'])} МСК</i>"]
     return "\n".join(L)
 
 
 def profile_kb(viewer_id: int, target_id: int):
     rows = []
     if viewer_id == target_id:
-        rows.append([btn("📝 Составить отчет", "rep:new")])
         me = get_user(viewer_id)
         my_rank = me["rank"] if me else None
+        if not my_rank:
+            rows.append([btn("📋 Мои заявки", "my:apps")])
+            if is_admin(viewer_id):
+                rows.append([btn("🛠 Админ-панель", "adm:home")])
+            return kb(rows)
+        rec = today_report(viewer_id)
+        rows.append([btn("✏️ Исправить отчёт" if rec else "📝 Сдать отчёт", "rep:new"),
+                     btn("📋 Мои отчёты", "rep:mine")])
+        if member_team(viewer_id) or teams_led_by(viewer_id):
+            rows.append([btn("👥 Команда", "team:hub")])
         if my_rank in ADDER_RANKS or is_admin(viewer_id):
             rows.append([btn("➕ Добавить работника", "aw:start")])
-        if my_rank in REQUESTER_RANKS and not is_admin(viewer_id):
+        if my_rank in REQUESTER_RANKS and not is_admin(viewer_id) and not teams_led_by(viewer_id):
             rows.append([btn("🙋 Запросить команду", "tr:start")])
         if is_lead_viewer(viewer_id):
-            rows.append([btn("📋 Посмотреть отчеты", "rep:open:0")])
-        if teams_led_by(target_id):
-            rows.append([btn("📊 Статистика моей команды", f"prof:team:{target_id}")])
+            rows.append([btn("🧾 Отчёты команды", "rep:open:0")])
     else:
         rows.append([btn("✉️ Записка", f"note:{target_id}"), btn("💸 Направить выплату", f"pay:{target_id}")])
         rows.append([btn("⬆️ Повысить", f"rk:up:{target_id}"), btn("⬇️ Понизить", f"rk:dn:{target_id}")])
@@ -614,6 +647,50 @@ def profile_kb(viewer_id: int, target_id: int):
         rows.append(extra)
         rows.append([btn("🏠 Мой профиль", "prof:me")])
     return kb(rows)
+
+
+# ---------- хаб «Команда» ----------
+def team_missing_today(tid: int) -> list:
+    today = msk_now().date().isoformat()
+    with db() as con:
+        return con.execute("""
+            SELECT u.* FROM team_members tm JOIN users u ON u.user_id=tm.user_id
+            WHERE tm.team_id=? AND u.is_blocked=0 AND NOT EXISTS (
+                SELECT 1 FROM reports r WHERE r.user_id=u.user_id AND r.report_date=? AND r.status<>'rejected')
+            ORDER BY u.username""", (tid, today)).fetchall()
+
+
+def team_hub(uid: int):
+    led = teams_led_by(uid)
+    mem = member_team(uid)
+    s7 = since7()
+    L = ["👥 <b>Команда</b>"]
+    rows = []
+    for t in led:
+        miss = team_missing_today(t["id"])
+        L += ["", f"👑 <b>«{esc(t['name'])}»</b> · {t['members']} чел.",
+              f"7 дней: {fmt_tot(team_totals(t['id'], s7))}"]
+        if t["members"]:
+            if miss:
+                names = ", ".join(who(m) for m in miss[:8]) + (f" и ещё {len(miss) - 8}" if len(miss) > 8 else "")
+                L.append(f"⏳ Не сдали отчёт сегодня ({len(miss)}): {names}")
+            else:
+                L.append("✅ Сегодня все сдали отчёт")
+        L.append(f"🔗 Ссылка для вступления: <code>{bot_link(t['ref_code'])}</code>")
+    if mem and not led:
+        L += ["", f"«{esc(mem['name'])}» · лидер {who(get_user(mem['leader_id']), mem['leader_id'])}",
+              f"Ваши 7 дней: {fmt_tot(user_totals(uid, s7))}"]
+    if not led and not mem:
+        L += ["", "Вы пока не состоите в команде."]
+    u = get_user(uid)
+    if led:
+        rows.append([btn("📊 Подробная статистика", f"prof:team:{uid}")])
+    if u and (u["rank"] in ADDER_RANKS or is_admin(uid)):
+        rows.append([btn("➕ Добавить работника", "aw:start")])
+    if u and u["rank"] in REQUESTER_RANKS and not led and not is_admin(uid):
+        rows.append([btn("🙋 Запросить команду", "tr:start")])
+    rows.append([btn("⬅️ Профиль", "prof:me")])
+    return "\n".join(L)[:4000], kb(rows)
 
 
 async def show_profile(target, viewer_id: int, uid: int):
@@ -635,6 +712,7 @@ class ReportFSM(StatesGroup):
     scouts = State()
     models = State()
     operators = State()
+    confirm = State()
 
 
 class NoteFSM(StatesGroup):
@@ -675,7 +753,7 @@ async def cmd_cancel(message: Message, state: FSMContext):
     if await state.get_state() is None:
         return
     await state.clear()
-    await message.answer("Отменено.", reply_markup=main_menu_kb())
+    await message.answer("Отменено.", reply_markup=main_menu_kb(message.from_user.id))
 
 
 # ---------- реферальный вход ----------
@@ -710,7 +788,7 @@ async def join_flow(message: Message, code: str, user=None):
     cur = member_team(u.id)
     if cur:
         if cur["id"] == team["id"]:
-            await message.answer(f"Вы уже в команде «{esc(team['name'])}».", reply_markup=main_menu_kb())
+            await message.answer(f"Вы уже в команде «{esc(team['name'])}».", reply_markup=main_menu_kb(u.id))
         else:
             await message.answer(f"Вы уже состоите в команде «{esc(cur['name'])}». "
                                  f"Чтобы сменить команду, напишите наставнику или администратору.")
@@ -733,8 +811,8 @@ async def finish_join(bot: Bot, user, team, kind: Optional[str], reply_to: Messa
     row = get_user(user.id)
     await reply_to.answer(
         f"✅ Вы в команде «{esc(team['name'])}». Ваш ранг: {esc(rank_label(row['rank'], row['level']))}.\n"
-        f"Профиль и отчёты — кнопка «👤 Профиль» или /profile.",
-        reply_markup=main_menu_kb())
+        f"Отчёт за день — кнопка «📝 Отчёт», всё остальное — «👤 Профиль».",
+        reply_markup=main_menu_kb(user.id))
     await safe_send(bot, team["leader_id"],
                     f"✅ По вашей ссылке в команду «{esc(team['name'])}» вступил(а) {who(row)} — "
                     f"{esc(rank_label(row['rank'], row['level']))}.")
@@ -756,9 +834,47 @@ async def cb_register(cb: CallbackQuery):
     await cb.answer()
 
 
+# ---------- команда и мои отчёты ----------
+@router.message(Command("team"))
+@router.message(F.text == BTN_TEAM)
+async def msg_team(message: Message, state: FSMContext):
+    await state.clear()
+    touch_user(message.from_user)
+    text, markup = team_hub(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "team:hub")
+async def cb_team_hub(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text, markup = team_hub(cb.from_user.id)
+    await show(cb, text, markup)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "rep:mine")
+async def cb_rep_mine(cb: CallbackQuery):
+    with db() as con:
+        rows = con.execute("SELECT * FROM reports WHERE user_id=? ORDER BY report_date DESC LIMIT 10",
+                           (cb.from_user.id,)).fetchall()
+    if not rows:
+        await cb.answer("Вы ещё не сдавали отчёты.", show_alert=True)
+        return
+    L = ["📋 <b>Мои отчёты</b> (последние 10)", ""]
+    for r in rows:
+        line = (f"{fmt_date(r['report_date'])} · {r['hours']:g} ч · "
+                f"{r['scouts']}/{r['models']}/{r['operators']} · {REPORT_STATUS.get(r['status'], r['status'])}")
+        if r["status"] == "rejected" and r["review_note"]:
+            line += f"\n   причина: {esc(r['review_note'])}"
+        L.append(line)
+    L += ["", "<i>Формат: часы · скауты/модели/операторы</i>"]
+    await show(cb, "\n".join(L), kb([[btn("📝 Сдать отчёт", "rep:new")], [btn("⬅️ Профиль", "prof:me")]]))
+    await cb.answer()
+
+
 # ---------- профиль ----------
 @router.message(Command("profile"))
-@router.message(F.text == "👤 Профиль")
+@router.message(F.text == BTN_PROFILE)
 async def msg_profile(message: Message, state: FSMContext):
     await state.clear()
     touch_user(message.from_user)
@@ -826,7 +942,8 @@ async def cb_rank(cb: CallbackQuery):
         await cb.answer(msg, show_alert=True)
         return
     row = get_user(uid)
-    await safe_send(cb.bot, uid, f"🔔 Ваш ранг изменён: <b>{esc(rank_label(row['rank'], row['level']))}</b>.")
+    await safe_send(cb.bot, uid, f"🔔 Ваш ранг изменён: <b>{esc(rank_label(row['rank'], row['level']))}</b>.",
+                    reply_markup=main_menu_kb(uid))
     await show_profile(cb, cb.from_user.id, uid)
     await cb.answer(msg)
 
@@ -844,7 +961,7 @@ async def cb_note(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-@router.message(NoteFSM.text, F.text)
+@router.message(NoteFSM.text, F.text, ~F.text.in_(MENU_TEXTS))
 async def note_text(message: Message, state: FSMContext):
     data = await state.get_data()
     uid = data["to"]
@@ -921,108 +1038,194 @@ async def cb_mv_do(cb: CallbackQuery):
     await cb.answer("Перераспределено ✅")
 
 
-# ---------- отчёты: составление ----------
+# ---------- отчёты: составление (один «живой» экран с быстрыми кнопками) ----------
+REP_ORDER = ["hours", "scouts", "models", "operators"]
+REP_STATE = {"hours": ReportFSM.hours, "scouts": ReportFSM.scouts,
+             "models": ReportFSM.models, "operators": ReportFSM.operators}
+REP_PROMPT = {
+    "hours": "⏱ Сколько часов сегодня отработано?",
+    "scouts": "🔎 Сколько скаутов приведено?",
+    "models": "📸 Сколько моделей приведено?",
+    "operators": "🎧 Сколько операторов приведено?",
+}
+REP_QUICK = {"hours": ["2", "4", "6", "8", "10", "12"], "scouts": ["0", "1", "2", "3", "4", "5"],
+             "models": ["0", "1", "2", "3", "4", "5"], "operators": ["0", "1", "2", "3", "4", "5"]}
+
+
 def report_preview(d: dict) -> str:
-    hours = f"{d['hours']:g}" if "hours" in d else "…"
-    scouts = str(d.get("scouts", "…"))
-    models = str(d.get("models", "…"))
-    operators = str(d.get("operators", "…"))
+    def v(k, fmt=str):
+        return fmt(d[k]) if k in d else "…"
     date = msk_now().strftime("%d.%m.%Y")
     return "\n".join([
         f"📝 <b>Отчёт за {date}</b>", "",
-        f"1. Сколько часов сегодня отработано: <b>{hours}</b>",
-        f"2. Сколько скаутов приведено: <b>{scouts}</b>",
-        f"3. Сколько моделей приведено: <b>{models}</b>",
-        f"4. Сколько операторов приведено: <b>{operators}</b>",
+        f"⏱ Часов отработано: <b>{v('hours', lambda x: f'{x:g}')}</b>",
+        f"🔎 Скаутов приведено: <b>{v('scouts')}</b>",
+        f"📸 Моделей приведено: <b>{v('models')}</b>",
+        f"🎧 Операторов приведено: <b>{v('operators')}</b>",
     ])
 
 
-CANCEL_KB = kb([[btn("❌ Отмена", "rep:cancel")]])
-STEPS = {
-    "hours": ("Сколько часов сегодня отработано? (число, можно 5.5)", ReportFSM.scouts),
-    "scouts": ("Сколько скаутов приведено? (число)", ReportFSM.models),
-    "models": ("Сколько моделей приведено? (число)", ReportFSM.operators),
-    "operators": ("", None),
-}
+def step_text(step: str, d: dict, err: str = "") -> str:
+    n = REP_ORDER.index(step) + 1
+    hint = "Нажмите кнопку или отправьте своё число" + (" (можно 5.5)." if step == "hours" else ".")
+    note = d.get("note", "") if step == "hours" else ""
+    return (f"{note}\n\n" if note else "") + report_preview(d) + "\n\n" + \
+        (f"⚠️ {err}\n" if err else "") + f"<b>Шаг {n}/4.</b> {REP_PROMPT[step]}\n<i>{hint}</i>"
 
 
-async def begin_report(message: Message, user_id: int, state: FSMContext):
+def step_kb(step: str):
+    rows = [[btn(v, f"rep:v:{v}") for v in REP_QUICK[step]]]
+    nav = []
+    if step != "hours":
+        nav.append(btn("⬅️ Назад", "rep:back"))
+    nav.append(btn("❌ Отмена", "rep:cancel"))
+    rows.append(nav)
+    return kb(rows)
+
+
+def confirm_kb():
+    return kb([[btn("✅ Отправить на проверку", "rep:send")],
+               [btn("⬅️ Назад", "rep:back"), btn("❌ Отмена", "rep:cancel")]])
+
+
+async def _wizard_show(bot: Bot, chat_id: int, state: FSMContext, text: str, markup):
+    """Обновляет одно и то же сообщение мастера (а не плодит новые)."""
+    mid = (await state.get_data()).get("mid")
+    if mid:
+        try:
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=mid, reply_markup=markup)
+            return
+        except TelegramBadRequest as e:
+            if "not modified" in str(e):
+                return
+    m = await bot.send_message(chat_id, text, reply_markup=markup)
+    await state.update_data(mid=m.message_id)
+
+
+async def _goto_step(bot: Bot, chat_id: int, state: FSMContext, step: str, err: str = ""):
+    await state.set_state(REP_STATE[step])
+    await _wizard_show(bot, chat_id, state, step_text(step, await state.get_data(), err), step_kb(step))
+
+
+async def begin_report(message: Message, user_id: int, state: FSMContext, edit_mid: Optional[int] = None):
     u = get_user(user_id)
     if not u or not u["rank"]:
-        await message.answer("Отчёты доступны участникам команды. Попросите наставника дать реферальную ссылку.")
+        await message.answer("Отчёты доступны участникам команды. Попросите наставника дать ссылку для вступления "
+                             "или подайте заявку в меню.")
         return
     await state.clear()
-    await state.set_state(ReportFSM.hours)
-    await message.answer(report_preview({}) + "\n\n<b>Шаг 1/4.</b> Сколько часов сегодня отработано? (число, можно 5.5)",
-                         reply_markup=CANCEL_KB)
+    data = {}
+    if edit_mid:
+        data["mid"] = edit_mid
+    prev = today_report(user_id)
+    if prev:
+        data["note"] = (f"ℹ️ Сегодня отчёт уже есть ({REPORT_STATUS.get(prev['status'], prev['status'])}). "
+                        f"Новый заменит его и уйдёт на проверку заново.")
+    await state.update_data(**data)
+    await _goto_step(message.bot, message.chat.id, state, "hours")
 
 
 @router.message(Command("report"))
+@router.message(F.text == BTN_REPORT)
 async def cmd_report(message: Message, state: FSMContext):
+    touch_user(message.from_user)
     await begin_report(message, message.from_user.id, state)
 
 
 @router.callback_query(F.data == "rep:new")
 async def cb_rep_new(cb: CallbackQuery, state: FSMContext):
-    await begin_report(cb.message, cb.from_user.id, state)
+    await begin_report(cb.message, cb.from_user.id, state, edit_mid=cb.message.message_id)
     await cb.answer()
 
 
 @router.callback_query(F.data == "rep:cancel")
 async def cb_rep_cancel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text("Отчёт отменён.")
+    await show(cb, "Отчёт отменён. Ничего не сохранено.", kb([[btn("📝 Начать заново", "rep:new"),
+                                                              btn("👤 Профиль", "prof:me")]]))
     await cb.answer()
 
 
-@router.message(ReportFSM.hours, F.text)
-async def rep_hours(message: Message, state: FSMContext):
+REP_ANY = StateFilter(ReportFSM.hours, ReportFSM.scouts, ReportFSM.models, ReportFSM.operators)
+
+
+def _parse_step(step: str, raw: str):
+    raw = raw.strip().replace(",", ".")
     try:
-        h = round(float(message.text.replace(",", ".").strip()), 2)
-        assert 0 <= h <= 24
-    except (ValueError, AssertionError):
-        await message.answer("Введите число часов от 0 до 24, например 6 или 5.5", reply_markup=CANCEL_KB)
+        if step == "hours":
+            h = round(float(raw), 2)
+            return h if 0 <= h <= 24 else None
+        return int(raw) if raw.isdigit() and int(raw) <= 9999 else None
+    except ValueError:
+        return None
+
+
+async def _rep_input(bot: Bot, chat_id: int, state: FSMContext, raw: str):
+    cur = await state.get_state()
+    step = cur.split(":")[1]
+    val = _parse_step(step, raw)
+    if val is None:
+        err = ("Введите число часов от 0 до 24, например 6 или 5.5." if step == "hours"
+               else "Введите целое число — 0 или больше.")
+        await _goto_step(bot, chat_id, state, step, err)
         return
-    await state.update_data(hours=h)
-    await state.set_state(ReportFSM.scouts)
-    await message.answer(report_preview(await state.get_data()) + "\n\n<b>Шаг 2/4.</b> Сколько скаутов приведено?",
-                         reply_markup=CANCEL_KB)
-
-
-async def _count_step(message: Message, state: FSMContext, key: str, nxt, prompt: str):
-    t = message.text.strip()
-    if not t.isdigit() or int(t) > 9999:
-        await message.answer("Введите целое число (0 или больше).", reply_markup=CANCEL_KB)
+    await state.update_data(**{step: val})
+    i = REP_ORDER.index(step)
+    if i + 1 < len(REP_ORDER):
+        await _goto_step(bot, chat_id, state, REP_ORDER[i + 1])
         return
-    await state.update_data(**{key: int(t)})
-    await state.set_state(nxt)
-    await message.answer(report_preview(await state.get_data()) + f"\n\n{prompt}", reply_markup=CANCEL_KB)
+    await state.set_state(ReportFSM.confirm)
+    await _wizard_show(bot, chat_id, state,
+                       report_preview(await state.get_data()) + "\n\n<b>Всё верно?</b> Отчёт уйдёт админам на проверку.",
+                       confirm_kb())
 
 
-@router.message(ReportFSM.scouts, F.text)
-async def rep_scouts(message: Message, state: FSMContext):
-    await _count_step(message, state, "scouts", ReportFSM.models, "<b>Шаг 3/4.</b> Сколько моделей приведено?")
+@router.callback_query(REP_ANY, F.data.startswith("rep:v:"))
+async def cb_rep_value(cb: CallbackQuery, state: FSMContext):
+    await _rep_input(cb.bot, cb.message.chat.id, state, cb.data.split(":")[2])
+    await cb.answer()
 
 
-@router.message(ReportFSM.models, F.text)
-async def rep_models(message: Message, state: FSMContext):
-    await _count_step(message, state, "models", ReportFSM.operators, "<b>Шаг 4/4.</b> Сколько операторов приведено?")
+@router.message(REP_ANY, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
+async def rep_typed(message: Message, state: FSMContext):
+    try:
+        await message.delete()  # чтобы чат не зарастал сообщениями
+    except TelegramAPIError:
+        pass
+    await _rep_input(message.bot, message.chat.id, state, message.text)
 
 
-@router.message(ReportFSM.operators, F.text)
-async def rep_operators(message: Message, state: FSMContext):
-    t = message.text.strip()
-    if not t.isdigit() or int(t) > 9999:
-        await message.answer("Введите целое число (0 или больше).", reply_markup=CANCEL_KB)
+@router.callback_query(F.data == "rep:back")
+async def cb_rep_back(cb: CallbackQuery, state: FSMContext):
+    cur = await state.get_state()
+    if cur == ReportFSM.confirm.state:
+        step = "operators"
+    elif cur in {s.state for s in REP_STATE.values()}:
+        step = REP_ORDER[max(0, REP_ORDER.index(cur.split(":")[1]) - 1)]
+    else:
+        await cb.answer("Отчёт уже закрыт.", show_alert=True)
         return
+    await _goto_step(cb.bot, cb.message.chat.id, state, step)
+    await cb.answer()
+
+
+@router.callback_query(ReportFSM.confirm, F.data == "rep:send")
+async def cb_rep_send(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
-    d["operators"] = int(t)
-    rid = save_report(message.from_user.id, d["hours"], d["scouts"], d["models"], d["operators"])
     await state.clear()
-    await message.answer("✅ <b>Отчёт отправлен на проверку</b> — вы получите уведомление, когда админ его "
-                         "подтвердит.\n\n" + report_preview(d),
-                         reply_markup=kb([[btn("👤 Профиль", "prof:me")]]))
-    await notify_admins_report(message.bot, rid)
+    if not all(k in d for k in REP_ORDER):
+        await cb.answer("Сессия устарела — начните заново.", show_alert=True)
+        return
+    rid = save_report(cb.from_user.id, d["hours"], d["scouts"], d["models"], d["operators"])
+    await show(cb, "✅ <b>Отчёт отправлен на проверку</b>\nКак только админ его подтвердит, я напишу вам.\n\n"
+               + report_preview(d), kb([[btn("📋 Мои отчёты", "rep:mine"), btn("👤 Профиль", "prof:me")]]))
+    await cb.answer("Отправлено ✅")
+    await notify_admins_report(cb.bot, rid)
+
+
+@router.callback_query(F.data.startswith(("rep:v:", "rep:send")))
+async def cb_rep_stale(cb: CallbackQuery):
+    await cb.answer("Эта форма уже закрыта. Нажмите «📝 Отчёт», чтобы начать заново.", show_alert=True)
 
 
 # ---------- отчёты: просмотр ----------
@@ -1155,32 +1358,69 @@ async def reminder_loop(bot: Bot):
 
 
 # ======================= АДМИН-ПАНЕЛЬ /opcaadm =======================
+def count_pending_apps() -> int:
+    with db() as con:
+        return con.execute("SELECT COUNT(*) n FROM applications WHERE status='pending'").fetchone()["n"]
+
+
+def admin_menu_text() -> str:
+    n_rep, n_app, n_req = count_pending_reports(), count_pending_apps(), count_pending_team_requests()
+    L = ["🛠 <b>Админ-панель</b>", ""]
+    if n_rep or n_app or n_req:
+        L.append("<b>Ждёт решения:</b>")
+        if n_rep:
+            L.append(f"🧾 отчётов на проверке — <b>{n_rep}</b>")
+        if n_app:
+            L.append(f"📥 заявок оператор/скаут — <b>{n_app}</b>")
+        if n_req:
+            L.append(f"🙋 запросов на команду — <b>{n_req}</b>")
+    else:
+        L.append("✅ Всё разобрано, очередей нет.")
+    return "\n".join(L)
+
+
+def _cnt(label: str, n: int) -> str:
+    return f"{label} ({n})" if n else label
+
+
 def admin_menu_kb():
-    n_req = count_pending_team_requests()
+    n_rep, n_app, n_req = count_pending_reports(), count_pending_apps(), count_pending_team_requests()
     return kb([
-        [btn("📥 Заявки", "adm:apps:pending"), btn("🧾 Отчёты на проверку", "adm:reports")],
-        [btn("🙋 Запросы команд" + (f" ({n_req})" if n_req else ""), "adm:rqs")],
-        [btn("📊 Статистика", "adm:stats"), btn("🎉 Разослать модель", "adm:nm")],
+        # очереди — сверху, с цифрами
+        [btn(_cnt("🧾 Отчёты", n_rep), "adm:reports"), btn(_cnt("📥 Заявки", n_app), "adm:apps:pending")],
+        [btn(_cnt("🙋 Запросы команд", n_req), "adm:rqs"), btn("📝 Кто не сдал отчёт", "adm:noreport")],
+        # люди
         [btn("👥 Команды", "adm:teams"), btn("🙍 Пользователи", "adm:users")],
-        [btn("🆕 Новые участники", "adm:joins"), btn("📸 Отметить новую модель", "adm:newmodel")],
-        [btn("📨 Рассылка", "adm:bc")],
-        [btn("📝 Кто не сдал отчёт", "adm:noreport"), btn("🏆 Рейтинг", "adm:top")],
-        [btn("📣 В группу моделей", "adm:grp:model"), btn("📣 В группу скаутов", "adm:grp:scout")],
-        [btn("🚫 Блокировки", "adm:bans"), btn("💬 Чаты и напоминания", "adm:chats")],
-        [btn("📄 Выгрузить пользователей CSV", "adm:csv")],
+        [btn("🆕 Новые участники", "adm:joins"), btn("🚫 Блокировки", "adm:bans")],
+        # модели и рассылки
+        [btn("🎉 Новая модель у скаута", "adm:nm"), btn("📸 Отметить новую модель", "adm:newmodel")],
+        [btn("📨 Рассылка", "adm:bc"), btn("📣 В группу…", "adm:grpmenu")],
+        # аналитика и настройки
+        [btn("📊 Статистика", "adm:stats"), btn("🏆 Рейтинг", "adm:top")],
+        [btn("💬 Чаты и напоминания", "adm:chats"), btn("📄 CSV", "adm:csv")],
     ])
 
 
+@admin_router.callback_query(F.data == "adm:grpmenu")
+async def adm_grpmenu(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await show(cb, "📣 <b>Сообщение в группу</b>\nКуда отправляем?",
+               kb([[btn("📸 В группу моделей", "adm:grp:model"), btn("🔎 В группу скаутов", "adm:grp:scout")],
+                   [btn("⬅️ Назад", "adm:home")]]))
+    await cb.answer()
+
+
 @admin_router.message(Command("opcaadmin", "opcaadm"))
+@admin_router.message(F.text == BTN_ADMIN)
 async def cmd_opcaadm(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_menu_kb())
+    await message.answer(admin_menu_text(), reply_markup=admin_menu_kb())
 
 
 @admin_router.callback_query(F.data == "adm:home")
 async def adm_home(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await show(cb, "🛠 <b>Админ-панель</b>", admin_menu_kb())
+    await show(cb, admin_menu_text(), admin_menu_kb())
     await cb.answer()
 
 
@@ -1518,7 +1758,8 @@ async def adm_rk(cb: CallbackQuery):
         await cb.answer(msg, show_alert=True)
         return
     row = get_user(uid)
-    await safe_send(cb.bot, uid, f"🔔 Ваш ранг изменён: <b>{esc(rank_label(row['rank'], row['level']))}</b>.")
+    await safe_send(cb.bot, uid, f"🔔 Ваш ранг изменён: <b>{esc(rank_label(row['rank'], row['level']))}</b>.",
+                    reply_markup=main_menu_kb(uid))
     text, markup = admin_user_card(uid)
     await show(cb, text, markup)
     await cb.answer(msg)
@@ -1532,7 +1773,7 @@ async def adm_role(cb: CallbackQuery):
         await cb.answer("Ошибка.", show_alert=True)
         return
     set_rank(uid, kind, 1)
-    await safe_send(cb.bot, uid, f"🔔 Вам назначена роль: <b>{KIND_TITLES[kind]}</b>.")
+    await safe_send(cb.bot, uid, f"🔔 Вам назначена роль: <b>{KIND_TITLES[kind]}</b>.", reply_markup=main_menu_kb(uid))
     if tid:
         text, markup = team_card(tid)
         await show(cb, text, markup)
@@ -1855,10 +2096,10 @@ async def adm_app_decide(cb: CallbackQuery):
         u = get_user(a["user_id"])
         if u and not u["rank"] and a["kind"] in KIND_TITLES:
             set_rank(a["user_id"], a["kind"], 1)
-            text += f"\nВам назначена роль: <b>{esc(KIND_TITLES[a['kind']])}</b>. Профиль и отчёты — кнопка «👤 Профиль»."
+            text += f"\nВам назначена роль: <b>{esc(KIND_TITLES[a['kind']])}</b>. Отчёт за день — кнопка «📝 Отчёт»."
     else:
         text = f"❌ К сожалению, ваша заявка ({esc(kind_title)}) отклонена."
-    await safe_send(cb.bot, a["user_id"], text)
+    await safe_send(cb.bot, a["user_id"], text, reply_markup=main_menu_kb(a["user_id"]))
     track_event(a["user_id"], f"application_{'approved' if approved else 'rejected'}")
     card, markup = app_card(aid)
     await show(cb, card, markup)
@@ -2358,13 +2599,24 @@ def top_text(show_ids: bool) -> str:
 
 
 @router.message(Command("top"))
-async def cmd_top(message: Message):
+@router.message(F.text == BTN_TOP)
+async def cmd_top(message: Message, state: FSMContext):
+    await state.clear()
     touch_user(message.from_user)
     u = get_user(message.from_user.id)
     if not is_admin(message.from_user.id) and not (u and u["rank"]):
-        await message.answer("Рейтинг доступен участникам команд.", reply_markup=main_menu_kb())
+        await message.answer("🏆 Рейтинг доступен участникам команд. Вступите в команду по ссылке наставника "
+                             "или подайте заявку.", reply_markup=main_menu_kb(message.from_user.id))
         return
-    await message.answer(top_text(is_admin(message.from_user.id)), reply_markup=main_menu_kb())
+    await message.answer(top_text(is_admin(message.from_user.id)),
+                         reply_markup=kb([[btn("🔄 Обновить", "top:refresh"), btn("👤 Профиль", "prof:me")]]))
+
+
+@router.callback_query(F.data == "top:refresh")
+async def cb_top_refresh(cb: CallbackQuery):
+    await show(cb, top_text(is_admin(cb.from_user.id)),
+               kb([[btn("🔄 Обновить", "top:refresh"), btn("👤 Профиль", "prof:me")]]))
+    await cb.answer("Обновлено")
 
 
 @admin_router.callback_query(F.data == "adm:top")
@@ -2527,8 +2779,8 @@ async def add_worker(bot: Bot, by_id: int, team_id: int, kind: str, ident_text: 
         row = get_user(tid)
         label = esc(rank_label(row["rank"], row["level"]))
         await safe_send(bot, tid, f"✅ {who(adder, by_id)} добавил(а) вас в команду «{tname}». "
-                                  f"Ваш ранг: <b>{label}</b>.\nПрофиль и отчёты — кнопка «👤 Профиль».",
-                        reply_markup=main_menu_kb())
+                                  f"Ваш ранг: <b>{label}</b>.\nОтчёт за день — кнопка «📝 Отчёт».",
+                        reply_markup=main_menu_kb(tid))
         if team["leader_id"] not in (by_id, tid):
             await safe_send(bot, team["leader_id"],
                             f"➕ {who(adder, by_id)} добавил(а) в вашу команду «{tname}»: {who(row)} · {label}.")
@@ -2597,7 +2849,7 @@ async def _apply_invite(bot: Bot, inv, user, reply_to: Message, quiet: bool = Fa
     row = get_user(user.id)
     label = esc(rank_label(row["rank"], row["level"]))
     await reply_to.answer(f"✅ Вы в команде «{esc(team['name'])}». Ваш ранг: <b>{label}</b>.\n"
-                          f"Профиль и отчёты — кнопка «👤 Профиль» или /profile.", reply_markup=main_menu_kb())
+                          f"Отчёт за день — кнопка «📝 Отчёт», всё остальное — «👤 Профиль».", reply_markup=main_menu_kb(user.id))
     await safe_send(bot, inv["added_by"], f"✅ По вашему приглашению в команду «{esc(team['name'])}» "
                                           f"вступил(а) {who(row)} · {label}.")
     if team["leader_id"] != inv["added_by"]:
