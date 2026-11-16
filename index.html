@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Кабинет</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  --bg:var(--tg-theme-bg-color,#ffffff); --text:var(--tg-theme-text-color,#17181a);
+  --hint:var(--tg-theme-hint-color,#7b8088); --link:var(--tg-theme-link-color,#2a7de1);
+  --btn:var(--tg-theme-button-color,#2a7de1); --btn-t:var(--tg-theme-button-text-color,#fff);
+  --card:var(--tg-theme-secondary-bg-color,#f2f3f5); --line:rgba(127,127,127,.22);
+  --ok:#2e9d5b; --bad:#d6453d; --wait:#c78a12; --r:14px;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:var(--tg-theme-bg-color,#17181b); --text:var(--tg-theme-text-color,#f1f2f4);
+  --card:var(--tg-theme-secondary-bg-color,#222428); --hint:var(--tg-theme-hint-color,#8b9098);
+}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 -apple-system,"Segoe UI",Roboto,sans-serif}
+body{padding:14px 16px calc(84px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto}
+h1{font-size:20px;margin:0 0 4px;line-height:1.2;word-break:break-word}
+h2{font-size:12px;margin:20px 0 8px;color:var(--hint);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+h2:first-child{margin-top:4px}
+p{margin:0 0 8px}
+.muted{color:var(--hint)} .small{font-size:13px} .hidden{display:none!important}
+.card{background:var(--card);border-radius:var(--r);padding:14px;margin-bottom:10px}
+.row{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.col{display:flex;flex-direction:column;gap:2px;min-width:0}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:10px}
+.grid .card{margin:0}
+.stat b{display:block;font-size:24px;line-height:1.1} .stat span{font-size:12px;color:var(--hint)}
+.hero{display:flex;gap:12px;align-items:center;margin:2px 0 14px}
+.ava{width:52px;height:52px;border-radius:50%;background:var(--btn);color:var(--btn-t);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;flex:none}
+.ava.sm{width:36px;height:36px;font-size:15px;background:rgba(127,127,127,.2);color:var(--text)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.chip{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;background:rgba(127,127,127,.18)}
+.chip.mute{color:var(--hint)}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;background:rgba(127,127,127,.18);white-space:nowrap}
+.badge.approved{color:var(--ok);background:rgba(46,157,91,.14)} .badge.rejected{color:var(--bad);background:rgba(214,69,61,.14)} .badge.pending{color:var(--wait);background:rgba(199,138,18,.16)}
+.banner{border-radius:var(--r);padding:12px 14px;margin-bottom:10px;font-size:14px}
+.banner.wait{background:rgba(199,138,18,.14);color:var(--text)} .banner.bad{background:rgba(214,69,61,.12)} .banner.ok{background:rgba(46,157,91,.13)}
+label{display:block;font-size:13px;color:var(--hint);margin:12px 0 4px}
+input,textarea,select{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit;font-size:16px}
+textarea{resize:none;min-height:72px}
+input:focus,textarea:focus,select:focus{outline:2px solid var(--btn);outline-offset:-1px}
+input.err{border-color:var(--bad)}
+.err-t{color:var(--bad);font-size:13px;margin-top:6px;min-height:0}
+button{font:inherit;border:0;border-radius:12px;padding:12px 14px;background:var(--btn);color:var(--btn-t);font-weight:600;cursor:pointer;min-height:44px}
+button.ghost{background:transparent;color:var(--link);border:1px solid var(--line)}
+button.bad{background:var(--bad);color:#fff} button.ok{background:var(--ok);color:#fff}
+button.sm{min-height:36px;padding:7px 12px;font-size:14px}
+button:disabled{opacity:.5;cursor:default}
+.full{width:100%;margin-top:14px}
+.btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap} .btns button{flex:1;min-width:120px}
+.actions{display:grid;grid-template-columns:1fr;gap:8px}
+.actions.two{grid-template-columns:1fr 1fr}
+.seg{display:flex;gap:6px;background:var(--card);padding:4px;border-radius:12px;margin-bottom:12px}
+.seg button{flex:1;background:transparent;color:var(--hint);padding:8px 4px;min-height:38px;font-size:13px;border-radius:9px}
+.seg button.on{background:var(--bg);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.seg button em{font-style:normal;background:var(--bad);color:#fff;border-radius:9px;padding:0 6px;font-size:11px;margin-left:4px}
+.kinds{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.kinds button{background:var(--card);color:var(--text);border:2px solid transparent;display:flex;flex-direction:column;gap:2px;align-items:center;padding:10px 4px}
+.kinds button span{font-size:22px} .kinds button.on{border-color:var(--btn)}
+.chiprow{display:flex;gap:8px;margin-top:8px}
+.chiprow button{flex:1;background:var(--bg);border:1px solid var(--line);color:var(--text);min-height:36px;padding:6px}
+.step{display:flex;gap:8px;align-items:stretch}
+.step input{text-align:center;font-weight:600}
+.step button{width:48px;flex:none;background:var(--bg);border:1px solid var(--line);color:var(--text);font-size:20px;padding:0}
+.person{display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.person:first-child{border-top:0}
+.person .col{flex:1}
+.person b.num{font-size:16px}
+.pos{width:28px;text-align:center;font-weight:700;flex:none}
+details.card summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;gap:10px}
+details.card summary::-webkit-details-marker{display:none}
+.linkbox{background:var(--bg);border:1px dashed var(--line);border-radius:10px;padding:10px;font-size:13px;word-break:break-all;margin-top:8px}
+nav{position:fixed;left:0;right:0;bottom:0;display:flex;background:var(--bg);border-top:1px solid var(--line);padding:6px 6px calc(6px + env(safe-area-inset-bottom));z-index:10}
+nav button{flex:1;background:none;color:var(--hint);padding:4px 2px;font-size:11px;font-weight:600;border-radius:8px;position:relative;min-height:48px}
+nav button i{display:block;font-style:normal;font-size:20px;margin-bottom:1px} nav button.on{color:var(--btn)}
+nav button em{position:absolute;top:0;left:55%;background:var(--bad);color:#fff;font-style:normal;font-size:10px;border-radius:9px;padding:0 5px;line-height:15px}
+.toast{position:fixed;left:16px;right:16px;bottom:calc(88px + env(safe-area-inset-bottom));background:#222;color:#fff;padding:11px 14px;border-radius:12px;text-align:center;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;z-index:50;max-width:608px;margin:0 auto}
+.toast.show{opacity:1;transform:none}
+.center{text-align:center;padding:36px 10px}
+.empty{text-align:center;padding:26px 10px;color:var(--hint)} .empty b{display:block;font-size:34px;margin-bottom:6px}
+.skel{height:64px;border-radius:var(--r);background:var(--card);margin-bottom:10px;animation:pulse 1.2s infinite ease-in-out}
+@keyframes pulse{50%{opacity:.5}}
+#sheet{position:fixed;inset:0;z-index:40;display:none}
+#sheet.open{display:block}
+#sheet .scrim{position:absolute;inset:0;background:rgba(0,0,0,.45)}
+#sheet .panel{position:absolute;left:0;right:0;bottom:0;max-width:640px;margin:0 auto;background:var(--bg);border-radius:20px 20px 0 0;padding:10px 16px calc(18px + env(safe-area-inset-bottom));max-height:92vh;overflow:auto;animation:up .18s ease-out}
+@keyframes up{from{transform:translateY(40px);opacity:0}}
+#sheet .grab{width:40px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 12px}
+#sheet h2.sh{font-size:18px;text-transform:none;letter-spacing:0;color:var(--text);margin:0 0 4px}
+</style>
+</head>
+<body>
+<div id="app"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+<nav id="nav" class="hidden"></nav>
+<div id="sheet" aria-modal="true"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script>
+'use strict';
+const tg = window.Telegram && Telegram.WebApp;
+try { if (tg) { tg.ready(); tg.expand(); } } catch (e) {}
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const KIND = {scout:['🔎','Скаут'], operator:['🎧','Оператор'], model:['📸','Модель']};
+const ST = {pending:'⏳ на проверке', approved:'✅ подтверждён', rejected:'❌ отклонён'};
+const SKEL = '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
+let me = null, tab = 'home', adminSub = 'reports', rt = 0;
+
+/* ---------- утилиты ---------- */
+async function api(path, body) {
+  let r;
+  try {
+    r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json', 'X-Init-Data': tg ? tg.initData : ''}, body: JSON.stringify(body || {})});
+  } catch (e) { return {ok:false, net:true, error:'Нет связи с сервером. Проверьте интернет и повторите.'}; }
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) { j.ok = false; if (!j.error) j.error = 'Ошибка ' + r.status; }
+  if (r.status === 401) j.auth = true;
+  return j;
+}
+function toast(t) { const el = $('#toast'); el.textContent = t; el.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('show'), 2600); }
+function haptic(kind) { try { tg.HapticFeedback.notificationOccurred(kind); } catch (e) {} }
+function openLink(u) { (tg && u.startsWith('https://t.me/')) ? tg.openTelegramLink(u) : window.open(u, '_blank'); }
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); }
+  catch (e) { const ta = document.createElement('textarea'); ta.value = t; ta.style.cssText = 'position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch (_) {} ta.remove(); }
+  toast('Ссылка скопирована');
+}
+const badge = s => `<span class="badge ${s}">${ST[s] || esc(s)}</span>`;
+const chip = (t, cls = '') => `<span class="chip ${cls}">${esc(t)}</span>`;
+const stat = (n, l) => `<div class="card stat"><b>${esc(n)}</b><span>${l}</span></div>`;
+const kindLabel = k => KIND[k] ? KIND[k][0] + ' ' + KIND[k][1] : '';
+const initial = n => (String(n).replace(/^@/, '').trim()[0] || '?').toUpperCase();
+const fmtH = h => String(Math.round(h * 100) / 100);
+const empty = (ico, t, sub) => `<div class="empty"><b>${ico}</b>${esc(t)}${sub ? `<div class="small" style="margin-top:4px">${esc(sub)}</div>` : ''}</div>`;
+
+/* ---------- каркас ---------- */
+function tabs() {
+  const m = me.me, t = [['home', '🏠', 'Главная']];
+  if (m.can_report) t.push(['report', '📝', 'Отчёт']);
+  if (m.is_member) t.push(['team', '👥', 'Команда'], ['top', '🏆', 'Рейтинг']);
+  if (m.is_admin) t.push(['admin', '🛠', 'Админ']);
+  return t;
+}
+function renderNav() {
+  const nav = $('#nav'); nav.classList.remove('hidden');
+  const badgeN = me.pending + me.pending_teams;
+  nav.innerHTML = tabs().map(([k, i, t]) => `<button data-act="tab" data-tab="${k}" class="${tab === k ? 'on' : ''}"><i>${i}</i>${t}${k === 'admin' && badgeN ? `<em>${badgeN}</em>` : ''}</button>`).join('');
+}
+async function load() { const j = await api('/api/me'); if (j.ok) { me = j; return true; } fatal(j); return false; }
+async function refreshMe() { const j = await api('/api/me'); if (j.ok) { me = j; renderNav(); } return j.ok; }
+function fatal(j) {
+  $('#nav').classList.add('hidden');
+  $('#app').innerHTML = j.auth
+    ? `<div class="center"><h1>🔒</h1><p>${esc(j.error || 'Не удалось открыть')}</p><p class="muted">Откройте приложение кнопкой «Кабинет» в боте.</p></div>`
+    : `<div class="center"><h1>📡</h1><p>${esc(j.error || 'Не удалось загрузить')}</p><button data-act="boot">Повторить</button></div>`;
+}
+async function boot() { $('#app').innerHTML = SKEL; if (await load()) { if (!tabs().some(t => t[0] === tab)) tab = 'home'; render(); } }
+
+// Каждый вид возвращает {html, after}. Токен rt отбрасывает устаревшие ответы при быстром переключении вкладок.
+async function render(keepScroll) {
+  const my = ++rt, y = window.scrollY;
+  renderNav();
+  if (!keepScroll) $('#app').innerHTML = SKEL;
+  let out;
+  try { out = await ({home: viewHome, report: viewReport, team: viewTeam, top: viewTop, admin: viewAdmin}[tab])(); }
+  catch (e) { console.error(e); out = {html: `<div class="center"><h1>⚠️</h1><p>Что-то пошло не так</p><button data-act="boot">Повторить</button></div>`}; }
+  if (my !== rt) return;
+  $('#app').innerHTML = out.html;
+  if (out.after) out.after($('#app'));
+  window.scrollTo(0, keepScroll ? y : 0);
+}
+const go = t => { tab = t; render(); };
+
+/* ---------- шторка ---------- */
+let sheetBack = null;
+function openSheet(html, mount) {
+  const s = $('#sheet'); s.innerHTML = '<div class="scrim" data-act="close-sheet"></div><div class="panel" role="dialog"><div class="grab"></div><div id="sheet-body"></div></div>';
+  s.classList.add('open'); setSheet(html, mount);
+  try { if (tg && !sheetBack) { sheetBack = closeSheet; tg.BackButton.show(); tg.BackButton.onClick(sheetBack); } } catch (e) {}
+}
+function setSheet(html, mount) { const b = $('#sheet-body'); if (!b) return; b.innerHTML = html; if (mount) mount(b); }
+function closeSheet() {
+  $('#sheet').classList.remove('open'); $('#sheet').innerHTML = '';
+  try { if (tg && sheetBack) { tg.BackButton.offClick(sheetBack); tg.BackButton.hide(); } } catch (e) {} sheetBack = null;
+}
+const errText = (el, t) => { el.textContent = t || ''; };
+
+/* ---------- ГЛАВНАЯ ---------- */
+function viewHome() {
+  const m = me.me, w = me.week, a = me.all, t = me.today, rq = m.team_request;
+  const brought = w.scouts + w.models + w.operators;
+  const chips = [m.rank ? chip(m.rank) : (m.is_admin ? chip('🛠 Администратор') : chip('Без ранга', 'mute'))];
+  if (m.team) chips.push(chip('👥 ' + m.team));
+  m.leads.forEach(x => chips.push(chip('👑 ' + x)));
+  let h = `<div class="hero"><div class="ava">${esc(initial(m.name))}</div><div class="col"><h1>${esc(m.name)}</h1><div class="chips">${chips.join('')}</div></div></div>`;
+
+  if (!m.is_member) {
+    h += `<div class="card"><b>Вы пока не в команде</b><p class="muted small" style="margin-top:6px">Чтобы сдавать отчёты и видеть рейтинг, вступите в команду: получите ссылку-приглашение у наставника или подайте заявку в боте.</p></div>`;
+    return {html: h};
+  }
+  if (m.can_report) {
+    h += `<div class="card">${t
+      ? `<div class="row"><div class="col"><b>Отчёт за сегодня сдан</b><span class="muted small">${t.hours} ч · приведено ${t.scouts + t.models + t.operators}</span></div>${badge(t.status)}</div>${t.status === 'rejected' && t.note ? `<div class="muted small" style="margin-top:6px">Причина: ${esc(t.note)}</div>` : ''}${t.status === 'rejected' ? `<button class="full" data-act="tab" data-tab="report">Исправить и отправить</button>` : ''}`
+      : `<div class="row"><div class="col"><b>Отчёт за сегодня</b><span class="muted small">ещё не сдан</span></div><button data-act="tab" data-tab="report">Сдать</button></div>`}</div>`;
+  }
+  if (rq && rq.status === 'pending') h += `<div class="banner wait">⏳ Заявка на команду «${esc(rq.name)}» отправлена администратору и ждёт решения.</div>`;
+  else if (rq && rq.status === 'rejected') h += `<div class="banner bad">❌ Заявка на команду «${esc(rq.name)}» отклонена${rq.note ? ': ' + esc(rq.note) : ''}.</div>`;
+  else if (rq && rq.status === 'approved' && m.leads.includes(rq.name)) h += `<div class="banner ok">✅ Команда «${esc(rq.name)}» создана — вы её лидер.</div>`;
+
+  if (m.is_adder || m.can_request_team) {
+    h += `<h2>Команда</h2><div class="actions ${m.is_adder && m.can_request_team ? 'two' : ''}">` +
+      (m.is_adder ? `<button data-act="add-worker">➕ Добавить работника</button>` : '') +
+      (m.can_request_team ? `<button class="ghost" data-act="request-team">🙋 Запросить команду</button>` : '') + `</div>`;
+  }
+  h += `<h2>За 7 дней</h2>
+    <div class="grid">${stat(fmtH(w.hours) + ' ч', 'отработано')}${stat(brought, 'приведено людей')}</div>
+    <div class="card row small"><span>🔎 Скаутов <b>${w.scouts}</b></span><span>📸 Моделей <b>${w.models}</b></span><span>🎧 Операторов <b>${w.operators}</b></span></div>
+    <h2>За всё время</h2>
+    <div class="card muted small">Отчётов: <b style="color:var(--text)">${a.reports}</b> · часов: <b style="color:var(--text)">${fmtH(a.hours)}</b> · приведено: <b style="color:var(--text)">${a.scouts + a.models + a.operators}</b></div>`;
+  return {html: h};
+}
+
+/* ---------- ОТЧЁТ ---------- */
+const stepper = (k, v) => `<div class="step"><button type="button" data-act="step" data-k="${k}" data-d="-1" aria-label="Меньше">−</button><input id="f-${k}" inputmode="numeric" pattern="[0-9]*" placeholder="0" value="${v}"><button type="button" data-act="step" data-k="${k}" data-d="1" aria-label="Больше">+</button></div>`;
+async function viewReport() {
+  const t = me.today;
+  const hist = await api('/api/history');
+  const h = `
+    <h1>Отчёт за сегодня</h1>
+    ${t ? `<div class="banner ${t.status === 'rejected' ? 'bad' : 'wait'}"><div class="row"><span>Уже отправлен</span>${badge(t.status)}</div><div class="small muted" style="margin-top:4px">Повторная отправка заменит отчёт и вернёт его на проверку.</div></div>` : ''}
+    <div class="card">
+      <label for="f-hours" style="margin-top:0">Сколько часов отработано</label>
+      <input id="f-hours" inputmode="decimal" placeholder="например 5.5" value="${t ? t.hours : ''}">
+      <div class="chiprow">${[2, 4, 6, 8].map(x => `<button type="button" data-act="hours" data-v="${x}">${x} ч</button>`).join('')}</div>
+      <label>Скаутов приведено</label>${stepper('scouts', t ? t.scouts : 0)}
+      <label>Моделей приведено</label>${stepper('models', t ? t.models : 0)}
+      <label>Операторов приведено</label>${stepper('operators', t ? t.operators : 0)}
+      <div class="err-t" id="rep-err"></div>
+      <button class="full" id="send" data-act="send-report">${t ? 'Отправить заново' : 'Отправить отчёт'}</button>
+    </div>
+    <h2>Последние отчёты</h2>
+    ${(hist.reports || []).map(r => `<div class="card"><div class="row"><b>${esc(r.date)}</b>${badge(r.status)}</div><div class="muted small">${fmtH(r.hours)} ч · скаутов ${r.scouts} · моделей ${r.models} · операторов ${r.operators}</div>${r.status === 'rejected' && r.note ? `<div style="color:var(--bad);margin-top:4px" class="small">${esc(r.note)}</div>` : ''}</div>`).join('') || empty('🗒', 'Пока пусто', 'Здесь появятся ваши отчёты')}`;
+  return {html: h};
+}
+async function sendReport() {
+  const err = $('#rep-err'), b = $('#send'); errText(err, '');
+  const val = k => $('#f-' + k).value.trim().replace(',', '.');
+  const hours = val('hours');
+  if (hours === '' || isNaN(+hours) || +hours < 0 || +hours > 24) { errText(err, 'Укажите часы: число от 0 до 24'); $('#f-hours').focus(); haptic('error'); return; }
+  const body = {hours};
+  for (const k of ['scouts', 'models', 'operators']) { const v = val(k) || '0'; if (!/^\d{1,4}$/.test(v)) { errText(err, 'Количество людей — целое число от 0'); haptic('error'); return; } body[k] = v; }
+  b.disabled = true;
+  const j = await api('/api/submit', body);
+  b.disabled = false;
+  if (!j.ok) { errText(err, j.error || 'Не удалось отправить'); haptic('error'); return; }
+  haptic('success'); toast('Отправлено на проверку ✅'); await refreshMe(); render();
+}
+
+/* ---------- КОМАНДА ---------- */
+async function viewTeam() {
+  const j = await api('/api/team');
+  if (!j.ok) return {html: `<div class="center"><p>${esc(j.error)}</p><button data-act="boot">Повторить</button></div>`};
+  const m = me.me, rq = m.team_request;
+  let h = '<h1>Команда</h1>';
+  if (!j.teams.length) {
+    h += empty('👥', 'Вы пока не состоите в команде', m.can_request_team ? 'Запросите создание своей команды — администратор рассмотрит заявку' : '');
+  }
+  for (const t of j.teams) {
+    h += `<div class="card"><div class="row"><div class="col"><b style="font-size:17px">«${esc(t.name)}»</b><span class="muted small">Лидер: ${esc(t.leader)}${t.is_leader ? ' (вы)' : ''} · ${t.member_count} чел.</span></div></div>`;
+    if (t.can_add) h += `<button class="full" data-act="add-worker" data-team="${t.id}">➕ Добавить работника</button>`;
+    h += '</div>';
+    if (t.can_add) {
+      h += `<h2>Участники (${t.members.length})</h2><div class="card" style="padding:4px 14px">` +
+        (t.members.map(p => `<div class="person"><div class="ava sm">${esc(initial(p.name))}</div><div class="col"><span>${esc(p.name)}</span><span class="muted small">${esc(p.rank)}</span></div><div style="text-align:right"><b class="num">${p.brought7}</b><div class="muted small">за 7 дн.</div></div></div>`).join('') || `<div class="empty small">Пока никого — добавьте первого работника</div>`) + '</div>';
+      if (t.invites.length) {
+        h += `<h2>Ждут запуска бота (${t.invites.length})</h2>` + t.invites.map(i => `<div class="card"><div class="row"><div class="col"><span>${esc(i.who)}</span><span class="muted small">${esc(kindLabel(i.kind))} · ${esc(i.date)}</span></div><div style="display:flex;gap:6px"><button class="ghost sm" data-act="copy" data-text="${esc(i.link)}">Копировать</button><button class="ghost sm" data-act="share" data-text="${esc(i.link)}">Отправить</button></div></div></div>`).join('');
+      }
+    }
+  }
+  if (rq && rq.status === 'pending') h += `<div class="banner wait" style="margin-top:14px">⏳ Заявка на команду «${esc(rq.name)}» ждёт решения администратора.</div>`;
+  else if (m.can_request_team) h += `<h2>Новая команда</h2><button class="ghost full" style="margin-top:0" data-act="request-team">🙋 Запросить команду</button><p class="muted small" style="margin-top:6px">Администратор создаст команду, а вы станете её лидером.</p>`;
+  return {html: h};
+}
+
+async function sheetAddWorker(teamId) {
+  openSheet('<div class="center muted">Загрузка…</div>');
+  const j = await api('/api/team');
+  if (!j.ok) { setSheet(`<p>${esc(j.error)}</p><button class="ghost full" data-act="close-sheet">Закрыть</button>`); return; }
+  const teams = j.teams.filter(t => t.can_add);
+  if (!teams.length) {
+    setSheet(`<h2 class="sh">Добавить работника</h2><p class="muted">У вас пока нет команды, поэтому добавлять людей некуда.</p>` +
+      (me.me.can_request_team ? `<button class="full" data-act="request-team">🙋 Запросить команду</button>` : `<p class="small muted">${esc(me.me.request_block || '')}</p>`) +
+      `<button class="ghost full" data-act="close-sheet">Закрыть</button>`);
+    return;
+  }
+  let kind = 'scout', tid = teams.some(t => t.id === +teamId) ? +teamId : teams[0].id;
+  setSheet(`
+    <h2 class="sh">Добавить работника</h2>
+    <p class="muted small">Выберите роль и укажите @username или ID. Если человек ещё не запускал бота — сохраним приглашение и дадим ссылку.</p>
+    ${teams.length > 1 ? `<label>Команда</label><select id="aw-team">${teams.map(t => `<option value="${t.id}" ${t.id === tid ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>` : `<p class="small">Команда: <b>«${esc(teams[0].name)}»</b></p>`}
+    <label>Роль</label>
+    <div class="kinds">${Object.entries(KIND).map(([k, [i, n]]) => `<button type="button" data-kind="${k}" class="${k === kind ? 'on' : ''}"><span>${i}</span>${n}</button>`).join('')}</div>
+    <label for="aw-user">@username или ID</label>
+    <input id="aw-user" placeholder="@username" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off">
+    <div class="err-t" id="aw-err"></div>
+    <button class="full" id="aw-go">Добавить</button>`, root => {
+    const inp = $('#aw-user', root), err = $('#aw-err', root), go = $('#aw-go', root);
+    $$('[data-kind]', root).forEach(b => b.onclick = () => { kind = b.dataset.kind; $$('[data-kind]', root).forEach(x => x.classList.toggle('on', x === b)); });
+    const sel = $('#aw-team', root); if (sel) sel.onchange = () => tid = +sel.value;
+    inp.oninput = () => { inp.classList.remove('err'); errText(err, ''); };
+    inp.onkeydown = e => { if (e.key === 'Enter') go.click(); };
+    go.onclick = async () => {
+      const v = inp.value.trim();
+      if (!v) { inp.classList.add('err'); errText(err, 'Укажите @username или ID'); inp.focus(); return; }
+      go.disabled = true;
+      const r = await api('/api/team/add', {team_id: tid, kind, user: v});
+      go.disabled = false;
+      if (!r.ok) { inp.classList.add('err'); errText(err, r.message || r.error || 'Не удалось добавить'); haptic('error'); return; }
+      haptic('success');
+      setSheet(`<h2 class="sh">${r.status === 'added' ? '✅ Готово' : '📨 Приглашение сохранено'}</h2><p style="white-space:pre-wrap">${esc(r.message)}</p>` +
+        (r.link ? `<div class="linkbox">${esc(r.link)}</div><div class="btns"><button class="ghost" data-act="copy" data-text="${esc(r.link)}">Копировать</button><button data-act="share" data-text="${esc(r.link)}">Отправить в Telegram</button></div>` : '') +
+        `<div class="btns"><button class="ghost" data-act="add-worker" data-team="${tid}">➕ Добавить ещё</button><button class="ghost" data-act="close-sheet">Готово</button></div>`);
+      refreshMe().then(() => { if (tab === 'team' || tab === 'home') render(true); });
+    };
+    setTimeout(() => { try { inp.focus(); } catch (e) {} }, 120);
+  });
+}
+
+function sheetRequestTeam() {
+  const rq = me.me.team_request;
+  if (!me.me.can_request_team) {
+    openSheet(`<h2 class="sh">Запросить команду</h2><p class="muted">${esc(me.me.request_block || 'Сейчас запросить команду нельзя.')}</p><button class="ghost full" data-act="close-sheet">Закрыть</button>`);
+    return;
+  }
+  openSheet(`
+    <h2 class="sh">Запросить команду</h2>
+    <p class="muted small">Заявка уйдёт администратору. Когда её одобрят, команда будет создана, а вы станете лидером.${rq && rq.status === 'rejected' ? ' Прошлая заявка была отклонена' + (rq.note ? ': ' + esc(rq.note) : '') + '.' : ''}</p>
+    <label for="tr-name">Название команды</label>
+    <input id="tr-name" maxlength="40" placeholder="например: Северные волки" autocomplete="off">
+    <label for="tr-comment">Комментарий (необязательно)</label>
+    <textarea id="tr-comment" maxlength="300" placeholder="Как планируете набирать людей, опыт, пожелания"></textarea>
+    <div class="err-t" id="tr-err"></div>
+    <button class="full" id="tr-go">Отправить заявку</button>`, root => {
+    const name = $('#tr-name', root), err = $('#tr-err', root), go = $('#tr-go', root);
+    name.oninput = () => { name.classList.remove('err'); errText(err, ''); };
+    go.onclick = async () => {
+      const n = name.value.trim().replace(/\s+/g, ' ');
+      if (n.length < 2) { name.classList.add('err'); errText(err, 'Название — от 2 до 40 символов'); name.focus(); return; }
+      go.disabled = true;
+      const r = await api('/api/team/request', {name: n, comment: $('#tr-comment', root).value.trim()});
+      go.disabled = false;
+      if (!r.ok) { name.classList.add('err'); errText(err, r.error || 'Не удалось отправить'); haptic('error'); return; }
+      haptic('success'); closeSheet(); toast('Заявка отправлена администратору ✅');
+      await refreshMe(); if (tab === 'home' || tab === 'team') render(true);
+    };
+    setTimeout(() => { try { name.focus(); } catch (e) {} }, 120);
+  });
+}
+
+/* ---------- РЕЙТИНГ ---------- */
+async function viewTop() {
+  const j = await api('/api/top'), med = ['🥇', '🥈', '🥉'];
+  if (!j.ok) return {html: `<div class="center"><p>${esc(j.error)}</p></div>`};
+  const list = (arr, f) => arr.length ? arr.map((x, i) => `<div class="card person" style="margin-bottom:8px;border-top:0"><div class="pos">${med[i] || i + 1}</div><div class="col"><span>${esc(x.name)}</span><span class="muted small">${f(x)}</span></div><b class="num">${x.brought}</b></div>`).join('') : empty('🏆', 'Пока нет данных');
+  return {html: `<h1>Рейтинг · 7 дней</h1><div class="muted small" style="margin-bottom:6px">Число справа — приведено людей</div><h2>Люди</h2>${list(j.people || [], x => fmtH(x.hours) + ' ч')}<h2>Команды</h2>${list(j.teams || [], x => x.members + ' чел.')}`};
+}
+
+/* ---------- АДМИН ---------- */
+async function viewAdmin() {
+  const [p, tr] = await Promise.all([api('/api/admin/pending'), api('/api/admin/team_requests')]);
+  if (!p.ok) return {html: `<div class="center">${esc(p.error)}</div>`};
+  me.pending = p.total; me.pending_teams = tr.ok ? tr.total : 0; renderNav();
+  const seg = [['reports', 'Отчёты', p.total], ['teams', 'Команды', me.pending_teams], ['alert', '🎉 Модель', 0]];
+  let h = `<h1>Админ</h1><div class="seg">${seg.map(([k, t, n]) => `<button data-act="admin-sub" data-sub="${k}" class="${adminSub === k ? 'on' : ''}">${t}${n ? `<em>${n}</em>` : ''}</button>`).join('')}</div>`;
+  if (adminSub === 'reports') {
+    h += p.reports.map(r => `
+      <div class="card" data-id="${r.id}">
+        <div class="row"><b>${esc(r.user)}</b><span class="muted small">${esc(r.date)}</span></div>
+        <div class="muted small">${esc(r.rank)}</div>
+        <div style="margin:6px 0">${fmtH(r.hours)} ч · скаутов <b>${r.scouts}</b> · моделей <b>${r.models}</b> · операторов <b>${r.operators}</b></div>
+        <input class="note hidden" placeholder="Причина отклонения (необязательно)">
+        <div class="btns"><button class="ok" data-act="rv" data-a="approve">✅ Подтвердить</button><button class="bad" data-act="rv" data-a="reject">❌ Отклонить</button>${r.contact.startsWith('https://t.me/') ? `<button class="ghost" data-act="chat" data-url="${esc(r.contact)}">💬 Связаться</button>` : ''}</div>
+      </div>`).join('') || empty('🎉', 'Очередь пуста', 'Все отчёты проверены');
+  } else if (adminSub === 'teams') {
+    h += (tr.requests || []).map(r => `
+      <div class="card" data-rq="${r.id}">
+        <div class="row"><b>${esc(r.user)}</b><span class="muted small">${esc(r.date)}</span></div>
+        <div class="muted small">${esc(r.rank)}</div>
+        ${r.comment ? `<div style="margin:6px 0" class="small">${esc(r.comment)}</div>` : ''}
+        <label>Название команды</label><input class="rq-name" maxlength="40" value="${esc(r.name)}">
+        <input class="note hidden" style="margin-top:8px" placeholder="Причина отказа (необязательно)">
+        <div class="err-t"></div>
+        <div class="btns"><button class="ok" data-act="rq" data-a="approve">✅ Создать</button><button class="bad" data-act="rq" data-a="reject">❌ Отклонить</button>${r.contact.startsWith('https://t.me/') ? `<button class="ghost" data-act="chat" data-url="${esc(r.contact)}">💬 Связаться</button>` : ''}</div>
+      </div>`).join('') || empty('🙋', 'Запросов на команды нет');
+  } else {
+    h += `<div class="card">
+      <label style="margin-top:0">У кого новая модель (@username или ID)</label><input id="nm-user" placeholder="@user" autocapitalize="off">
+      <label>Комментарий (необязательно)</label><input id="nm-comment" placeholder="например: Анна, 22 года" maxlength="200">
+      <label>Куда отправить</label>
+      <select id="nm-mode"><option value="all">В группу и в бота</option><option value="group">Только в группу</option><option value="bot">Только в бота</option></select>
+      <button class="full" id="nm-send" data-act="nm-send">Отправить оповещение</button></div>`;
+  }
+  return {html: h};
+}
+const armed = new Set();
+async function adminDecide(card, kind, a, extra) {
+  const key = kind + card.dataset.id + card.dataset.rq;
+  const note = $('.note', card), err = $('.err-t', card);
+  if (a === 'reject' && !armed.has(key)) { armed.add(key); note.classList.remove('hidden'); note.focus(); $('[data-a="reject"]', card).textContent = '❌ Подтвердить отказ'; return; }
+  $$('button', card).forEach(x => x.disabled = true);
+  const url = kind === 'rv' ? '/api/admin/review' : '/api/admin/team_request/decide';
+  const r = await api(url, Object.assign({id: +(card.dataset.id || card.dataset.rq), action: a, note: note.value}, extra || {}));
+  if (!r.ok && kind === 'rq' && err) { err.textContent = r.message || r.error || 'Ошибка'; $$('button', card).forEach(x => x.disabled = false); haptic('error'); return; }
+  armed.delete(key);
+  toast(r.message || r.error || 'Готово'); haptic(r.ok ? 'success' : 'error');
+  render(true);
+}
+async function sendModelAlert() {
+  const user = $('#nm-user').value.trim(); if (!user) { toast('Укажите @username или ID'); return; }
+  const b = $('#nm-send'); b.disabled = true;
+  const r = await api('/api/admin/model_alert', {user, comment: $('#nm-comment').value.trim(), mode: $('#nm-mode').value});
+  b.disabled = false;
+  if (!r.ok) { toast(r.error || 'Не удалось отправить'); haptic('error'); return; }
+  const x = r.result; haptic('success');
+  toast(`Готово ✅ группа: ${({ok:'да', skip:'—', not_configured:'не задана'})[x.group] || 'ошибка'}, в боте: ${x.sent}`);
+  $('#nm-user').value = ''; $('#nm-comment').value = '';
+}
+
+/* ---------- действия (делегирование кликов) ---------- */
+const actions = {
+  boot: () => boot(),
+  tab: el => go(el.dataset.tab),
+  'close-sheet': () => closeSheet(),
+  'add-worker': el => sheetAddWorker(el.dataset.team),
+  'request-team': () => { closeSheet(); setTimeout(sheetRequestTeam, 0); },
+  copy: el => copyText(el.dataset.text),
+  share: el => { const u = 'https://t.me/share/url?url=' + encodeURIComponent(el.dataset.text) + '&text=' + encodeURIComponent('Приглашение в команду'); (tg ? tg.openTelegramLink(u) : window.open(u, '_blank')); },
+  chat: el => openLink(el.dataset.url),
+  'send-report': () => sendReport(),
+  hours: el => { $('#f-hours').value = el.dataset.v; },
+  step: el => { const i = $('#f-' + el.dataset.k); i.value = Math.max(0, Math.min(9999, (parseInt(i.value, 10) || 0) + +el.dataset.d)); },
+  'admin-sub': el => { adminSub = el.dataset.sub; render(); },
+  rv: el => adminDecide(el.closest('[data-id]'), 'rv', el.dataset.a),
+  rq: el => { const c = el.closest('[data-rq]'); adminDecide(c, 'rq', el.dataset.a, {name: $('.rq-name', c).value}); },
+  'nm-send': () => sendModelAlert(),
+};
+document.addEventListener('click', e => { const el = e.target.closest('[data-act]'); if (el && actions[el.dataset.act]) actions[el.dataset.act](el, e); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#sheet').classList.contains('open')) closeSheet(); });
+document.addEventListener('focusin', e => { if (e.target.matches('#sheet input, #sheet textarea')) setTimeout(() => e.target.scrollIntoView({block: 'center', behavior: 'smooth'}), 250); });
+boot();
+</script>
+</body>
+</html>
