@@ -193,7 +193,8 @@ function closeSheet() {
 const errText = (el, t) => { el.textContent = t || ''; };
 
 /* ---------- ГЛАВНАЯ ---------- */
-function viewHome() {
+async function viewHome() {
+  const profRes = await api('/api/profile');
   const m = me.me, w = me.week, a = me.all, t = me.today, rq = m.team_request;
   const brought = w.scouts + w.models + w.operators;
   const chips = [m.rank ? chip(m.rank) : (m.is_admin ? chip('🛠 Администратор') : chip('Без ранга', 'mute'))];
@@ -203,7 +204,7 @@ function viewHome() {
 
   if (!m.is_member) {
     h += `<div class="card"><b>Вы пока не в команде</b><p class="muted small" style="margin-top:6px">Чтобы сдавать отчёты и видеть рейтинг, вступите в команду: получите ссылку-приглашение у наставника или подайте заявку в боте.</p></div>`;
-    return {html: h};
+    h += profilePanel(profRes); return {html: h};
   }
   if (m.can_report) {
     h += `<div class="card">${t
@@ -224,8 +225,20 @@ function viewHome() {
     <div class="card row small"><span>🔎 Скаутов <b>${w.scouts}</b></span><span>📸 Моделей <b>${w.models}</b></span><span>🎧 Операторов <b>${w.operators}</b></span></div>
     <h2>За всё время</h2>
     <div class="card muted small">Отчётов: <b style="color:var(--text)">${a.reports}</b> · часов: <b style="color:var(--text)">${fmtH(a.hours)}</b> · приведено: <b style="color:var(--text)">${a.scouts + a.models + a.operators}</b></div>`;
+  h += profilePanel(profRes);
   return {html: h};
 }
+
+function profilePanel(j) {
+  const p = j && j.profile;
+  if (!p) return `<h2>Профиль и анкета</h2><div class="card">Анкета ещё не привязана к вашему аккаунту. Если вы заполнили её по приглашению, дождитесь проверки администрацией.</div>`;
+  return `<h2>Моя анкета</h2><div class="card"><div class="row"><b>${esc(p.full_name)}</b>${badge(p.status)}</div><div class="muted small" style="margin:6px 0">${esc(kindLabel(p.kind))} · ${esc(p.phone)} · @${esc(p.tg_username || '—')}</div>${p.review_note ? `<p class="small">${esc(p.review_note)}</p>` : ''}<div class="btns"><button class="ghost" data-act="edit-profile">✏️ Редактировать анкету</button><button class="ghost" data-act="invited-list">👥 Список приглашённых</button></div><button class="full" data-act="role-request">🔄 Подать заявку на смену роли</button></div>`;
+}
+async function editProfile() { const j=await api('/api/profile'); const p=j.profile; if(!p) return toast('Анкета не найдена'); openSheet(`<h2 class="sh">Редактирование анкеты</h2><label>Фамилия и имя</label><input id="pf-name" value="${esc(p.full_name)}"><label>Дата рождения</label><input id="pf-birth" value="${esc(p.birth_date)}" placeholder="ГГГГ-ММ-ДД"><label>Телефон</label><input id="pf-phone" value="${esc(p.phone)}"><label>Username</label><input id="pf-user" value="${esc(p.tg_username)}"><label>Страна</label><input id="pf-country" value="${esc(p.country)}"><label>Уровень английского</label><input id="pf-en" value="${esc(p.english)}"><label>Опыт</label><textarea id="pf-exp">${esc(p.experience)}</textarea><button class="full" data-act="save-profile">Отправить на повторную проверку</button>`); }
+async function saveProfile() { const body={full_name:$('#pf-name').value,birth_date:$('#pf-birth').value,phone:$('#pf-phone').value,tg_username:$('#pf-user').value,country:$('#pf-country').value,english:$('#pf-en').value,experience:$('#pf-exp').value}; const r=await api('/api/profile/update',body); if(!r.ok) return toast(r.error); closeSheet(); toast('Анкета отправлена на проверку'); render(true); }
+async function invitedList() { const j=await api('/api/invited'); if(!j.ok) return toast(j.error); const html=(j.invited||[]).map(x=>`<div class="card"><b>${esc(x.name)}</b><div class="muted small">${esc(kindLabel(x.kind))} · ${esc(x.date)} · ${esc(x.phone)}</div>${badge(x.status)}</div>`).join('') || empty('👥','Пока никого нет'); openSheet(`<h2 class="sh">Список приглашённых</h2>${html}`); }
+async function roleRequest() { openSheet(`<h2 class="sh">Смена роли</h2><p class="muted small">Новая роль вступит в силу только после одобрения администрацией.</p><label>Желаемая роль</label><select id="role-new"><option value="scout">Скаут</option><option value="operator">Оператор</option><option value="model">Модель</option></select><button class="full" data-act="send-role-request">Отправить заявку</button>`); }
+async function sendRoleRequest() { const r=await api('/api/role/request',{role:$('#role-new').value}); if(!r.ok) return toast(r.error); closeSheet(); toast('Заявка отправлена администрации'); }
 
 /* ---------- ОТЧЁТ ---------- */
 const stepper = (k, v) => `<div class="step"><button type="button" data-act="step" data-k="${k}" data-d="-1" aria-label="Меньше">−</button><input id="f-${k}" inputmode="numeric" pattern="[0-9]*" placeholder="0" value="${v}"><button type="button" data-act="step" data-k="${k}" data-d="1" aria-label="Больше">+</button></div>`;
@@ -374,10 +387,10 @@ async function viewTop() {
 
 /* ---------- АДМИН ---------- */
 async function viewAdmin() {
-  const [p, tr] = await Promise.all([api('/api/admin/pending'), api('/api/admin/team_requests')]);
+  const [p, tr, wp, rr] = await Promise.all([api('/api/admin/pending'), api('/api/admin/team_requests'), api('/api/admin/profiles'), api('/api/admin/role_requests')]);
   if (!p.ok) return {html: `<div class="center">${esc(p.error)}</div>`};
   me.pending = p.total; me.pending_teams = tr.ok ? tr.total : 0; renderNav();
-  const seg = [['reports', 'Отчёты', p.total], ['teams', 'Команды', me.pending_teams], ['alert', '🎉 Модель', 0]];
+  const seg = [['reports', 'Отчёты', p.total], ['teams', 'Команды', me.pending_teams], ['profiles', 'Анкеты', wp.profiles ? wp.profiles.length : 0], ['roles', 'Смена роли', rr.requests ? rr.requests.length : 0], ['search', 'Поиск', 0], ['alert', '🎉 Модель', 0]];
   let h = `<h1>Админ</h1><div class="seg">${seg.map(([k, t, n]) => `<button data-act="admin-sub" data-sub="${k}" class="${adminSub === k ? 'on' : ''}">${t}${n ? `<em>${n}</em>` : ''}</button>`).join('')}</div>`;
   if (adminSub === 'reports') {
     h += p.reports.map(r => `
@@ -399,6 +412,12 @@ async function viewAdmin() {
         <div class="err-t"></div>
         <div class="btns"><button class="ok" data-act="rq" data-a="approve">✅ Создать</button><button class="bad" data-act="rq" data-a="reject">❌ Отклонить</button>${r.contact.startsWith('https://t.me/') ? `<button class="ghost" data-act="chat" data-url="${esc(r.contact)}">💬 Связаться</button>` : ''}</div>
       </div>`).join('') || empty('🙋', 'Запросов на команды нет');
+  } else if (adminSub === 'profiles') {
+    h += (wp.profiles || []).map(r => `<div class="card" data-profile="${r.id}"><b>${esc(r.name)}</b><div class="muted small">${esc(kindLabel(r.role))} · ${esc(r.phone)} · ${esc(r.date)}</div><div class="btns"><button class="ok" data-act="profile-review" data-a="approve">Одобрить</button><button class="bad" data-act="profile-review" data-a="reject">Отклонить</button></div></div>`).join('') || empty('🪪','Анкет на проверке нет');
+  } else if (adminSub === 'roles') {
+    h += (rr.requests || []).map(r => `<div class="card" data-role-req="${r.id}"><b>${esc(r.user)}</b><div class="muted small">${esc(kindLabel(r.old_role))} → ${esc(kindLabel(r.new_role))} · ${esc(r.date)}</div><div class="btns"><button class="ok" data-act="role-review" data-a="approve">Одобрить</button><button class="bad" data-act="role-review" data-a="reject">Отклонить</button></div></div>`).join('') || empty('🔄','Заявок на смену роли нет');
+  } else if (adminSub === 'search') {
+    h += `<div class="card"><label>Фамилия</label><input id="s-surname"><label>Имя</label><input id="s-first"><label>Username</label><input id="s-username" placeholder="@username"><label>Номер телефона</label><input id="s-phone"><button class="full" data-act="search-users">Найти</button></div><div id="search-results"></div>`;
   } else {
     h += `<div class="card">
       <label style="margin-top:0">У кого новая модель (@username или ID)</label><input id="nm-user" placeholder="@user" autocapitalize="off">
@@ -433,6 +452,10 @@ async function sendModelAlert() {
   $('#nm-user').value = ''; $('#nm-comment').value = '';
 }
 
+async function searchUsers() { const j=await api('/api/search',{surname:$('#s-surname').value,first_name:$('#s-first').value,username:$('#s-username').value,phone:$('#s-phone').value}); const el=$('#search-results'); if(!j.ok) {el.innerHTML=esc(j.error);return;} el.innerHTML=(j.results||[]).map(r=>`<div class="card"><b>${esc(r.name)}</b><div class="muted small">${esc(r.username||'')} · ${esc(r.phone||'')} · ${esc(kindLabel(r.role))}</div>${badge(r.status||'—')}</div>`).join('') || empty('🔎','Ничего не найдено'); }
+async function reviewProfile(el) { const c=el.closest('[data-profile]'); const r=await api('/api/admin/profile/decide',{id:+c.dataset.profile,action:el.dataset.a}); if(!r.ok) return toast(r.error); toast('Анкета обработана'); render(true); }
+async function reviewRole(el) { const c=el.closest('[data-role-req]'); const r=await api('/api/admin/role_request/decide',{id:+c.dataset.roleReq,action:el.dataset.a}); if(!r.ok) return toast(r.error); toast('Заявка обработана'); render(true); }
+
 /* ---------- действия (делегирование кликов) ---------- */
 const actions = {
   boot: () => boot(),
@@ -440,6 +463,7 @@ const actions = {
   'close-sheet': () => closeSheet(),
   'add-worker': el => sheetAddWorker(el.dataset.team),
   'request-team': () => { closeSheet(); setTimeout(sheetRequestTeam, 0); },
+  'edit-profile': () => editProfile(), 'save-profile': () => saveProfile(), 'invited-list': () => invitedList(), 'role-request': () => roleRequest(), 'send-role-request': () => sendRoleRequest(),
   copy: el => copyText(el.dataset.text),
   share: el => { const u = 'https://t.me/share/url?url=' + encodeURIComponent(el.dataset.text) + '&text=' + encodeURIComponent('Приглашение в команду'); (tg ? tg.openTelegramLink(u) : window.open(u, '_blank')); },
   chat: el => openLink(el.dataset.url),
@@ -449,7 +473,7 @@ const actions = {
   'admin-sub': el => { adminSub = el.dataset.sub; render(); },
   rv: el => adminDecide(el.closest('[data-id]'), 'rv', el.dataset.a),
   rq: el => { const c = el.closest('[data-rq]'); adminDecide(c, 'rq', el.dataset.a, {name: $('.rq-name', c).value}); },
-  'nm-send': () => sendModelAlert(),
+  'nm-send': () => sendModelAlert(), 'search-users': () => searchUsers(), 'profile-review': el => reviewProfile(el), 'role-review': el => reviewRole(el),
 };
 document.addEventListener('click', e => { const el = e.target.closest('[data-act]'); if (el && actions[el.dataset.act]) actions[el.dataset.act](el, e); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#sheet').classList.contains('open')) closeSheet(); });
