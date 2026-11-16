@@ -120,6 +120,69 @@ async def handle_api(bot, path: str, tg_user: dict, body: dict):
             "pending": T.count_pending_reports() if admin else 0,
             "pending_teams": T.count_pending_team_requests() if admin else 0}
 
+    if path == "/api/profile":
+        prof = T.profile_of(uid)
+        if not prof:
+            return 200, {"ok": True, "profile": None, "status": "not_found"}
+        return 200, {"ok": True, "profile": {"id": prof["id"], "full_name": prof["full_name"], "birth_date": prof["birth_date"], "phone": prof["phone"], "tg_username": prof["tg_username"], "country": prof["country"], "english": prof["english"], "experience": prof["experience"], "kind": prof["kind"], "status": prof["status"], "review_note": prof["review_note"] or ""}}
+
+    if path == "/api/profile/update":
+        prof = T.profile_of(uid)
+        if not prof:
+            return 404, {"ok": False, "error": "Анкета не найдена"}
+        if prof["status"] == "pending":
+            return 409, {"ok": False, "error": "Анкета уже находится на проверке. Дождитесь решения администрации."}
+        fields = {k: str(body.get(k) or "").strip() for k in ("full_name", "birth_date", "phone", "tg_username", "country", "english", "experience")}
+        if not fields["full_name"] or not fields["phone"]:
+            return 400, {"ok": False, "error": "Заполните имя и телефон"}
+        phone = re.sub(r"\D+", "", fields["phone"])
+        username = fields["tg_username"].lstrip("@").lower()
+        with T.db() as con:
+            others = con.execute("SELECT id,phone,tg_username FROM worker_profiles WHERE id<>? AND status<>'rejected'", (prof["id"],)).fetchall()
+            dup = next((r for r in others if (phone and re.sub(r"\D+", "", r["phone"] or "") == phone) or (username and (r["tg_username"] or "").lstrip("@").lower() == username)), None)
+            if dup:
+                return 409, {"ok": False, "error": "Пользователь с таким username или телефоном уже существует. Проверьте корректность данных."}
+            con.execute("UPDATE worker_profiles SET full_name=?,birth_date=?,phone=?,tg_username=?,country=?,english=?,experience=?,status='pending',reviewed_by=NULL,reviewed_at=NULL,review_note=NULL WHERE id=?", (fields["full_name"], fields["birth_date"], fields["phone"], username, fields["country"], fields["english"], fields["experience"], prof["id"]))
+        for aid in T.ADMIN_IDS:
+            await T.safe_send(bot, aid, f"🪪 Пользователь {uid} обновил анкету #{prof['id']}. Требуется повторная проверка.", reply_markup=T.kb([[T.btn("Открыть анкету", f"adm:wp:{prof['id']}")]]))
+        return 200, {"ok": True, "status": "pending"}
+
+    if path == "/api/invited":
+        with T.db() as con:
+            rows = con.execute("SELECT p.id,p.full_name,p.kind,p.status,p.created_at,p.phone,p.tg_username FROM worker_profiles p WHERE p.added_by=? ORDER BY p.id DESC LIMIT 100", (uid,)).fetchall()
+        return 200, {"ok": True, "invited": [{"id": r["id"], "name": r["full_name"], "kind": r["kind"], "status": r["status"], "date": T.fmt_date(r["created_at"]), "phone": r["phone"], "username": r["tg_username"]} for r in rows]}
+
+    if path == "/api/role/request":
+        new_role = str(body.get("role") or "")
+        if new_role not in T.KIND_TITLES:
+            return 400, {"ok": False, "error": "Выберите корректную роль"}
+        with T.db() as con:
+            exists = con.execute("SELECT id FROM role_change_requests WHERE user_id=? AND status='pending'", (uid,)).fetchone()
+            if exists: return 409, {"ok": False, "error": "У вас уже есть заявка на рассмотрении"}
+            rid = con.execute("INSERT INTO role_change_requests(user_id,old_role,new_role,created_at) VALUES(?,?,?,?)", (uid, u["rank"], new_role, T.utcnow())).lastrowid
+        for aid in T.ADMIN_IDS:
+            await T.safe_send(bot, aid, f"🔄 Заявка на смену роли #{rid}\nПользователь: {T.esc(T.who(u, uid))}\nТекущая роль: {T.esc(T.KIND_TITLES.get(u['rank'], u['rank'] or 'не назначена'))}\nНовая роль: {T.esc(T.KIND_TITLES[new_role])}", reply_markup=T.kb([[T.btn("Открыть заявки", "adm:role_requests")]]))
+        return 200, {"ok": True, "id": rid}
+
+    if path == "/api/search":
+        if not admin: return 403, {"ok": False, "error": "Нет доступа"}
+        q = str(body.get("q") or "").strip()
+        surname = str(body.get("surname") or "").strip()
+        first_name = str(body.get("first_name") or "").strip()
+        username = str(body.get("username") or "").strip().lstrip("@")
+        phone = str(body.get("phone") or "").strip()
+        if not any((q, surname, first_name, username, phone)): return 200, {"ok": True, "results": []}
+        with T.db() as con:
+            clauses=[]; params=[]
+            if q:
+                like="%"+q.replace("%","")+"%"; clauses.append("(p.full_name LIKE ? OR p.phone LIKE ? OR p.tg_username LIKE ? OR u.username LIKE ?)"); params += [like,like,like,like]
+            if surname: clauses.append("p.full_name LIKE ?"); params.append("%"+surname+"%")
+            if first_name: clauses.append("(p.full_name LIKE ? OR u.first_name LIKE ?)"); params += ["%"+first_name+"%", "%"+first_name+"%"]
+            if username: clauses.append("(p.tg_username LIKE ? OR u.username LIKE ?)"); params += ["%"+username+"%","%"+username+"%"]
+            if phone: clauses.append("p.phone LIKE ?"); params.append("%"+phone+"%")
+            rows = con.execute("SELECT p.id,p.user_id,p.full_name,p.phone,p.tg_username,p.kind,p.status,u.username AS account_username,u.first_name FROM worker_profiles p LEFT JOIN users u ON u.user_id=p.user_id WHERE " + " AND ".join(clauses) + " ORDER BY p.id DESC LIMIT 50", params).fetchall()
+        return 200, {"ok": True, "results": [{"id": r["id"], "user_id": r["user_id"], "name": r["full_name"] or r["first_name"] or "—", "username": r["tg_username"] or r["account_username"], "phone": r["phone"], "role": r["kind"], "status": r["status"]} for r in rows]}
+
     if path == "/api/history":
         with T.db() as con:
             rows = con.execute("SELECT * FROM reports WHERE user_id=? ORDER BY report_date DESC LIMIT 14",
@@ -193,6 +256,47 @@ async def handle_api(bot, path: str, tg_user: dict, body: dict):
     # ---- только для админов ----
     if not admin:
         return 403, {"ok": False, "error": "Нет доступа"}
+
+    if path == "/api/admin/profiles":
+        with T.db() as con:
+            rows = con.execute("SELECT p.*,u.username,u.first_name FROM worker_profiles p LEFT JOIN users u ON u.user_id=p.user_id WHERE p.status='pending' ORDER BY p.id DESC LIMIT 50").fetchall()
+        return 200, {"ok": True, "profiles": [{"id": r["id"], "user_id": r["user_id"], "name": r["full_name"], "phone": r["phone"], "username": r["tg_username"], "role": r["kind"], "date": T.fmt_date(r["created_at"])} for r in rows]}
+
+    if path == "/api/admin/profile/decide":
+        try: pid = _int(body.get("id"))
+        except (TypeError, ValueError): return 400, {"ok": False, "error": "Неверный ID"}
+        action = body.get("action")
+        if action not in ("approve", "reject"): return 400, {"ok": False, "error": "Неверное действие"}
+        p = T.worker_profile_get(pid)
+        if not p or p["status"] != "pending": return 404, {"ok": False, "error": "Анкета уже обработана"}
+        with T.db() as con:
+            con.execute("UPDATE worker_profiles SET status=?,reviewed_by=?,reviewed_at=? WHERE id=?", ("approved" if action=="approve" else "rejected", uid, T.utcnow(), pid))
+        if action == "approve" and p["user_id"]:
+            current=T.get_user(p["user_id"])
+            if current and not current["rank"]:
+                T.set_rank(p["user_id"], p["kind"], 1)
+                if p["team_id"]: T.add_member(p["user_id"], p["team_id"], via_ref=0, added_by=p["added_by"] or uid)
+        if p["user_id"]:
+            await T.safe_send(bot, p["user_id"], "✅ Анкета одобрена. Роль активирована." if action=="approve" else "❌ Анкета отклонена. Свяжитесь с пригласившим.", reply_markup=T.main_menu_kb(p["user_id"]))
+        return 200, {"ok": True}
+
+    if path == "/api/admin/role_requests":
+        with T.db() as con:
+            rows = con.execute("SELECT r.*,u.username,u.first_name FROM role_change_requests r LEFT JOIN users u ON u.user_id=r.user_id WHERE r.status='pending' ORDER BY r.id DESC LIMIT 50").fetchall()
+        return 200, {"ok": True, "requests": [{"id": r["id"], "user_id": r["user_id"], "user": ("@"+r["username"]) if r["username"] else r["first_name"], "old_role": r["old_role"], "new_role": r["new_role"], "date": T.fmt_date(r["created_at"])} for r in rows]}
+
+    if path == "/api/admin/role_request/decide":
+        try: rid = _int(body.get("id"))
+        except (TypeError, ValueError): return 400, {"ok": False, "error": "Неверный ID"}
+        action = body.get("action")
+        if action not in ("approve", "reject"): return 400, {"ok": False, "error": "Неверное действие"}
+        with T.db() as con:
+            r = con.execute("SELECT * FROM role_change_requests WHERE id=? AND status='pending'", (rid,)).fetchone()
+            if not r: return 404, {"ok": False, "error": "Заявка уже обработана"}
+            con.execute("UPDATE role_change_requests SET status=?,reviewed_by=?,reviewed_at=? WHERE id=?", ("approved" if action=="approve" else "rejected", uid, T.utcnow(), rid))
+        if action == "approve": T.set_rank(r["user_id"], r["new_role"], 1)
+        await T.safe_send(bot, r["user_id"], "✅ Заявка на смену роли одобрена. Новая роль активирована." if action=="approve" else "❌ Заявка на смену роли отклонена.", reply_markup=T.main_menu_kb(r["user_id"]))
+        return 200, {"ok": True}
 
     if path == "/api/admin/pending":
         out = []

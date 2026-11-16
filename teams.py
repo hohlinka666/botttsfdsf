@@ -13,7 +13,7 @@ import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -207,6 +207,33 @@ def init_team_db():
             token TEXT NOT NULL UNIQUE, username TEXT DEFAULT '',
             kind TEXT NOT NULL, team_id INTEGER NOT NULL, added_by INTEGER NOT NULL,
             created_at TEXT NOT NULL, claimed_by INTEGER, claimed_at TEXT)""")
+        # анкеты работников (кого привели через «Привести работника»)
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS worker_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invite_id INTEGER, user_id INTEGER, kind TEXT NOT NULL,
+            full_name TEXT NOT NULL, birth_date TEXT NOT NULL, phone TEXT NOT NULL,
+            tg_username TEXT DEFAULT '', headphones INTEGER DEFAULT 0,
+            english TEXT DEFAULT '', experience TEXT DEFAULT '', country TEXT DEFAULT '',
+            team_id INTEGER DEFAULT 0, added_by INTEGER, created_at TEXT NOT NULL)""")
+        wcols = {r["name"] for r in con.execute("PRAGMA table_info(worker_profiles)")}
+        for col, ddl in (("english", "TEXT DEFAULT ''"), ("experience", "TEXT DEFAULT ''"),
+                         ("country", "TEXT DEFAULT ''"), ("status", "TEXT NOT NULL DEFAULT 'approved'"),
+                         ("reviewed_by", "INTEGER"), ("reviewed_at", "TEXT"), ("review_note", "TEXT")):
+            if col not in wcols:
+                con.execute(f"ALTER TABLE worker_profiles ADD COLUMN {col} {ddl}")
+        con.execute("CREATE TABLE IF NOT EXISTS role_change_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, old_role TEXT, new_role TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, reviewed_by INTEGER, reviewed_at TEXT, review_note TEXT)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_wp_status ON worker_profiles(status)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_role_req_status ON role_change_requests(status)")
+        # приглашения уже работающих сотрудников в команду (нужно согласие приглашённого)
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS team_invites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id INTEGER NOT NULL, user_id INTEGER NOT NULL, invited_by INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, answered_at TEXT)""")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_wp_user ON worker_profiles(user_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_wp_invite ON worker_profiles(invite_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_tinv_user ON team_invites(user_id, status)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_treq_status ON team_requests(status)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_treq_user ON team_requests(user_id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_inv_user ON invites(username)")
@@ -621,6 +648,8 @@ def profile_kb(viewer_id: int, target_id: int):
     if viewer_id == target_id:
         me = get_user(viewer_id)
         my_rank = me["rank"] if me else None
+        rows.append([btn("🪪 Моя анкета", "my:profile"), btn("👥 Список приглашённых", "my:invited")])
+        rows.append([btn("🔄 Заявка на смену роли", "my:role")])
         if not my_rank:
             rows.append([btn("📋 Мои заявки", "my:apps")])
             if is_admin(viewer_id):
@@ -632,7 +661,9 @@ def profile_kb(viewer_id: int, target_id: int):
         if member_team(viewer_id) or teams_led_by(viewer_id):
             rows.append([btn("👥 Команда", "team:hub")])
         if my_rank in ADDER_RANKS or is_admin(viewer_id):
-            rows.append([btn("➕ Добавить работника", "aw:start")])
+            rows.append([btn("🆕 Привести работника", "bw:start")])
+            if member_team(viewer_id) or teams_led_by(viewer_id) or is_admin(viewer_id):
+                rows.append([btn("➕ Добавить в команду", "jt:start")])
         if my_rank in REQUESTER_RANKS and not is_admin(viewer_id) and not teams_led_by(viewer_id):
             rows.append([btn("🙋 Запросить команду", "tr:start")])
         if is_lead_viewer(viewer_id):
@@ -686,7 +717,9 @@ def team_hub(uid: int):
     if led:
         rows.append([btn("📊 Подробная статистика", f"prof:team:{uid}")])
     if u and (u["rank"] in ADDER_RANKS or is_admin(uid)):
-        rows.append([btn("➕ Добавить работника", "aw:start")])
+        rows.append([btn("🆕 Привести работника", "bw:start")])
+        if led or mem or is_admin(uid):
+            rows.append([btn("➕ Добавить в команду", "jt:start")])
     if u and u["rank"] in REQUESTER_RANKS and not led and not is_admin(uid):
         rows.append([btn("🙋 Запросить команду", "tr:start")])
     rows.append([btn("⬅️ Профиль", "prof:me")])
@@ -1706,7 +1739,11 @@ def admin_user_card(uid: int):
         [btn("✅ Разблокировать", f"adm:unbanu:{uid}") if banned else btn("🚫 Заблокировать", f"adm:ban:{uid}")],
         [btn("📋 Отчёты", f"rep:open:{uid}"), btn("⬅️ Назад", "adm:users")],
     ]
-    text = profile_text(uid, True) + ("\n\n🚫 <b>Доступ к боту ограничен</b>" if banned else "")
+    text = profile_text(uid, True)
+    prof = profile_of(uid)
+    if prof:
+        text += "\n\n" + profile_card(prof)
+    text += "\n\n🚫 <b>Доступ к боту ограничен</b>" if banned else ""
     return text, kb(rows)
 
 
@@ -2110,6 +2147,65 @@ def track_event(user_id: int, event: str):
     with db() as con:
         con.execute("INSERT INTO events(user_id,event,created_at) VALUES(?,?,?)", (user_id, event, utcnow()))
 
+
+@admin_router.callback_query(F.data == "adm:role_requests")
+async def adm_role_requests(cb: CallbackQuery):
+    with db() as con:
+        rows = con.execute("SELECT r.*,u.username,u.first_name FROM role_change_requests r LEFT JOIN users u ON u.user_id=r.user_id WHERE r.status='pending' ORDER BY r.id DESC LIMIT 30").fetchall()
+    buttons=[]
+    for r in rows:
+        name = "@" + r["username"] if r["username"] else (r["first_name"] or str(r["user_id"]))
+        buttons.append([btn(f"#{r['id']} · {name} · {KIND_TITLES.get(r['new_role'],r['new_role'])}"[:60], f"adm:role_req:{r['id']}")])
+    buttons.append([btn("⬅️ Админ-панель", "adm:home")])
+    await show(cb, "🔄 <b>Заявки на смену роли</b>\n" + ("Выберите заявку:" if rows else "Новых заявок нет."), kb(buttons)); await cb.answer()
+
+@admin_router.callback_query(F.data.regexp(r"^adm:role_req:\d+$"))
+async def adm_role_request_card(cb: CallbackQuery):
+    rid=int(cb.data.split(":")[2])
+    with db() as con:
+        r=con.execute("SELECT r.*,u.username,u.first_name FROM role_change_requests r LEFT JOIN users u ON u.user_id=r.user_id WHERE r.id=?", (rid,)).fetchone()
+    if not r: await cb.answer("Заявка не найдена", show_alert=True); return
+    name="@"+r["username"] if r["username"] else (r["first_name"] or str(r["user_id"]))
+    rows=[[btn("✅ Одобрить",f"adm:role_reqok:{rid}"),btn("❌ Отклонить",f"adm:role_reqno:{rid}")]] if r["status"]=="pending" else []
+    rows.append([btn("⬅️ К заявкам", "adm:role_requests")])
+    await show(cb, f"🔄 <b>Заявка #{rid}</b>\n{name}\nТекущая роль: {esc(KIND_TITLES.get(r['old_role'],r['old_role'] or '—'))}\nНовая роль: {esc(KIND_TITLES.get(r['new_role'],r['new_role']))}\nСтатус: {esc(r['status'])}", kb(rows)); await cb.answer()
+
+@admin_router.callback_query(F.data.regexp(r"^adm:role_req(ok|no):\d+$"))
+async def adm_role_request_decide(cb: CallbackQuery):
+    _,action,raw=cb.data.split(":"); rid=int(raw)
+    with db() as con:
+        r=con.execute("SELECT * FROM role_change_requests WHERE id=? AND status='pending'",(rid,)).fetchone()
+        if not r: await cb.answer("Заявка уже обработана",show_alert=True); return
+        approved=action=="role_reqok"
+        con.execute("UPDATE role_change_requests SET status=?,reviewed_by=?,reviewed_at=? WHERE id=?",("approved" if approved else "rejected",cb.from_user.id,utcnow(),rid))
+    if approved: set_rank(r["user_id"],r["new_role"],1)
+    await safe_send(cb.bot,r["user_id"],"✅ Заявка на смену роли одобрена. Новая роль активирована." if approved else "❌ Заявка на смену роли отклонена.",reply_markup=main_menu_kb(r["user_id"]))
+    await show(cb,"Заявка обработана.",kb([[btn("⬅️ К заявкам", "adm:role_requests")]])); await cb.answer("Готово")
+
+@admin_router.callback_query(F.data.regexp(r"^adm:wp:\d+$"))
+async def adm_worker_profile(cb: CallbackQuery):
+    pid = int(cb.data.split(":")[2]); p = worker_profile_get(pid)
+    if not p: await cb.answer("Анкета не найдена", show_alert=True); return
+    text = f"🪪 <b>Анкета #{pid}</b>\n{esc(p['full_name'])}\nРоль: {esc(KIND_TITLES.get(p['kind'], p['kind']))}\nДата рождения: {esc(p['birth_date'])}\nТелефон: {esc(p['phone'])}\nUsername: @{esc(p['tg_username'] or '—')}\nСтрана: {esc(p['country'] or '—')}\nСтатус: {esc(p['status'])}"
+    rows = [[btn("✅ Одобрить", f"adm:wpok:{pid}"), btn("❌ Отклонить", f"adm:wpno:{pid}")]] if p['status']=='pending' else []
+    await show(cb, text, kb(rows or [[btn("⬅️ Админ", "adm:home")]])); await cb.answer()
+
+@admin_router.callback_query(F.data.regexp(r"^adm:wp(ok|no):\d+$"))
+async def adm_worker_profile_decide(cb: CallbackQuery):
+    _, action, raw = cb.data.split(":"); pid=int(raw); p=worker_profile_get(pid)
+    if not p or p['status']!='pending': await cb.answer("Анкета уже обработана", show_alert=True); return
+    approved = action=='wpok'; status='approved' if approved else 'rejected'
+    with db() as con:
+        con.execute("UPDATE worker_profiles SET status=?,reviewed_by=?,reviewed_at=? WHERE id=? AND status='pending'", (status, cb.from_user.id, utcnow(), pid))
+    if approved and p['user_id']:
+        u=get_user(p['user_id'])
+        if u and not u['rank']:
+            set_rank(p['user_id'], p['kind'], 1)
+            if p['team_id']: add_member(p['user_id'], p['team_id'], via_ref=0, added_by=p['added_by'] or cb.from_user.id)
+    if p['user_id']:
+        await safe_send(cb.bot, p['user_id'], "✅ Ваша анкета одобрена. Роль активирована." if approved else "❌ Ваша анкета отклонена. Обратитесь к пригласившему для исправления.", reply_markup=main_menu_kb(p['user_id']))
+    await cb.answer("Одобрено" if approved else "Отклонено", show_alert=True)
+    await show(cb, f"Анкета #{pid}: {'одобрена' if approved else 'отклонена'}", kb([[btn("⬅️ Админ", "adm:home")]]))
 
 # ---------- статистика ----------
 @admin_router.callback_query(F.data == "adm:stats")
@@ -2679,7 +2775,7 @@ async def adm_noreport_go(cb: CallbackQuery):
 # Скауты и тимлиды добавляют скаутов / операторов / моделей в свою команду. Если человек ещё не запускал бота,
 # сохраняется приглашение: он попадёт в команду сам — по личной ссылке или как только запустит бота с этим @username.
 ADDER_RANKS = {"scout"} | LEADER_RANKS
-REQUESTER_RANKS = {"scout"} | LEADER_RANKS
+REQUESTER_RANKS = {"jr_tl"}     # свою команду запрашивает только младший тимлид (скауты работают в команде лидера)
 KIND_ICONS = {"scout": "🔎", "operator": "🎧", "model": "📸"}
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
 MAX_OPEN_INVITES = 30
@@ -2822,39 +2918,49 @@ async def _apply_invite(bot: Bot, inv, user, reply_to: Message, quiet: bool = Fa
         if not quiet:
             await reply_to.answer(text)
 
-    team = team_by_id(inv["team_id"])
-    if not team:
+    team = team_by_id(inv["team_id"]) if inv["team_id"] else None   # team_id=0 — работник без команды
+    if inv["team_id"] and not team:
         await say("Приглашение недействительно: команда расформирована.")
         return False
-    if is_admin(user.id) or user.id == team["leader_id"]:
+    if is_admin(user.id) or (team and user.id == team["leader_id"]):
         await say("Это приглашение для нового участника — вам оно не нужно.")
         return False
     cur = member_team(user.id)
-    if cur:
+    if team and cur:
         await say(f"Вы уже в команде «{esc(cur['name'])}»." if cur["id"] == team["id"] else
                   f"Вы уже состоите в команде «{esc(cur['name'])}», приглашение не применено. "
                   f"Чтобы сменить команду, напишите наставнику.")
         return False
+    existing = get_user(user.id)
+    if not team and existing and existing["rank"]:
+        await say("Вы уже работаете в проекте — приглашение не нужно.")
+        return False
     with db() as con:
         got = con.execute("UPDATE invites SET claimed_by=?, claimed_at=? WHERE id=? AND claimed_by IS NULL",
                           (user.id, utcnow(), inv["id"])).rowcount
+        con.execute("UPDATE worker_profiles SET user_id=? WHERE invite_id=?", (user.id, inv["id"]))
     if not got:
         await say("Это приглашение уже использовано.")
         return False
     touch_user(user)
     row = get_user(user.id)
-    if not row["rank"]:
+    prof = profile_of(user.id)
+    approved_profile = bool(prof and prof["status"] == "approved")
+    if not row["rank"] and approved_profile:
         set_rank(user.id, inv["kind"], 1)
-    add_member(user.id, team["id"], via_ref=0, added_by=inv["added_by"])
+    if team and approved_profile:
+        add_member(user.id, team["id"], via_ref=0, added_by=inv["added_by"])
     row = get_user(user.id)
     label = esc(rank_label(row["rank"], row["level"]))
-    await reply_to.answer(f"✅ Вы в команде «{esc(team['name'])}». Ваш ранг: <b>{label}</b>.\n"
-                          f"Отчёт за день — кнопка «📝 Отчёт», всё остальное — «👤 Профиль».", reply_markup=main_menu_kb(user.id))
-    await safe_send(bot, inv["added_by"], f"✅ По вашему приглашению в команду «{esc(team['name'])}» "
-                                          f"вступил(а) {who(row)} · {label}.")
-    if team["leader_id"] != inv["added_by"]:
-        await safe_send(bot, team["leader_id"], f"➕ В вашу команду «{esc(team['name'])}» вступил(а) "
-                                                f"{who(row)} · {label}.")
+    prof = profile_of(user.id)
+    name = f"{esc(prof['full_name'])} ({who(row)})" if prof else who(row)
+    await reply_to.answer((f"✅ Ваша анкета уже одобрена: <b>{label}</b>" if approved_profile else "⏳ Приглашение принято. Ваша анкета отправлена администрации на проверку. До одобрения роль не активируется.")
+                          + (f", команда «{esc(team['name'])}»." if team and approved_profile else ""),
+                          reply_markup=main_menu_kb(user.id))
+    await safe_send(bot, inv["added_by"], f"✅ По вашей анкете в проект пришёл(ла) {name} · {label}"
+                                          + (f", команда «{esc(team['name'])}»." if team else "."))
+    if team and team["leader_id"] != inv["added_by"]:
+        await safe_send(bot, team["leader_id"], f"➕ В вашу команду «{esc(team['name'])}» вступил(а) {name} · {label}.")
     return True
 
 
@@ -2885,101 +2991,788 @@ async def claim_username_invites(bot: Bot, user, reply_to: Message) -> bool:
     return await _apply_invite(bot, inv, user, reply_to, quiet=True)
 
 
-# ---------- бот: диалог «Добавить работника» ----------
-def _kind_picker(team: dict):
-    tid = team["id"]
-    return (f"➕ <b>Добавить работника</b>\nКоманда: «{esc(team['name'])}»\n\nКого добавляем?",
-            kb([[btn(f"{KIND_ICONS[k]} {KIND_TITLES[k]}", f"aw:k:{tid}:{k}") for k in KIND_TITLES],
-                [btn("⬅️ Отмена", "aw:x")]]))
+# ======================= АНКЕТА РАБОТНИКА =======================
+# Одна и та же анкета для самой заявки (bot_fixed.py) и для «Привести работника».
+MIN_AGE = {"scout": 10, "operator": 18, "model": 18}     # скаутом можно работать и до 18 лет
+KIND_WHO = {"scout": "скаутом", "operator": "оператором", "model": "моделью"}
+BIRTH_RE = re.compile(r"^\s*(\d{1,2})[./\- ](\d{1,2})[./\- ](\d{4})\s*$")
 
 
-async def aw_begin(target, user, state: FSMContext):
+def parse_fio(text: str) -> Optional[str]:
+    t = " ".join((text or "").split())
+    if not 5 <= len(t) <= 100 or len(t.split()) < 2 or any(ch.isdigit() for ch in t):
+        return None
+    return t
+
+
+def parse_birth(text: str):
+    """ДД.ММ.ГГГГ -> date | None."""
+    m = BIRTH_RE.match(text or "")
+    if not m:
+        return None
+    try:
+        d = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
+    today = msk_now().date()
+    if d > today or d.year < 1930:
+        return None
+    return d
+
+
+def age_from(d) -> int:
+    today = msk_now().date()
+    return today.year - d.year - ((today.month, today.day) < (d.month, d.day))
+
+
+def years_word(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "год"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "года"
+    return "лет"
+
+
+def age_problem(kind: str, age: int) -> str:
+    """Пустая строка — возраст подходит для роли."""
+    if age < MIN_AGE["scout"]:
+        return "Проверьте дату рождения: для работы нужно быть старше 10 лет."
+    if age < MIN_AGE.get(kind, 18):
+        return (f"Работать {KIND_WHO.get(kind, 'здесь')} можно только с 18 лет. "
+                f"Скаутом — можно и раньше.")
+    return ""
+
+
+def parse_phone(text: str) -> Optional[str]:
+    t = (text or "").strip()
+    if not re.fullmatch(r"\+?[\d\s()\-]{10,22}", t):
+        return None
+    digits = re.sub(r"\D", "", t)
+    if not 10 <= len(digits) <= 15:
+        return None
+    if len(digits) == 11 and digits[0] in "78":
+        return "+7" + digits[1:]
+    if len(digits) == 10:
+        return "+7" + digits
+    return "+" + digits
+
+
+def parse_username(text: str) -> Optional[str]:
+    p = parse_ident(text)
+    return p[1] if p and p[0] == "username" else None
+
+
+ENGLISH_LEVELS = ["Нет", "A1–A2 (начальный)", "B1 (средний)", "B2 (выше среднего)", "C1–C2 (продвинутый)"]
+
+
+def parse_exp(text: str) -> Optional[str]:
+    t = " ".join((text or "").split())
+    return t if 1 <= len(t) <= 800 else None
+
+
+def parse_country(text: str) -> Optional[str]:
+    t = " ".join((text or "").split())
+    return t if 2 <= len(t) <= 60 and not any(ch.isdigit() for ch in t) else None
+
+
+def fmt_anketa(a: dict) -> str:
+    birth = date.fromisoformat(a["birth"])
+    age = age_from(birth)
+    return "\n".join([
+        f"👤 ФИО: <b>{esc(a['fio'])}</b>",
+        f"🎂 Дата рождения: {birth.strftime('%d.%m.%Y')} ({age} {years_word(age)})",
+        f"📞 Телефон: {esc(a['phone'])}",
+        f"✈️ Telegram: {('@' + esc(a['tg'])) if a.get('tg') else 'нет username'}",
+        f"🗣 Английский: {esc(a.get('en') or '—')}",
+        f"💼 Опыт: {esc(a.get('exp') or '—')}",
+        f"🎧 Наушники: {'есть' if a.get('hp') else 'нет'}",
+        f"🌍 Страна: {esc(a.get('country') or '—')}",
+    ])
+
+
+def save_profile(a: dict, kind: str, team_id: int, by_id: int, user_id=None, invite_id=None):
+    phone = re.sub(r"\D+", "", str(a.get("phone") or ""))
+    uname = (a.get("tg") or "").strip().lstrip("@").lower()
+    with db() as con:
+        candidates = con.execute("SELECT id,full_name,phone,tg_username FROM worker_profiles WHERE status<>'rejected'").fetchall()
+        dup = next((r for r in candidates if (phone and re.sub(r"\D+", "", r["phone"] or "") == phone) or (uname and (r["tg_username"] or "").strip().lstrip("@").lower() == uname)), None)
+        if dup:
+            raise ValueError(f"Пользователь с таким телефоном или username уже существует (анкета #{dup['id']}, {dup['full_name']}). Проверьте введённые данные.")
+        con.execute("""INSERT INTO worker_profiles(invite_id,user_id,kind,full_name,birth_date,phone,tg_username,
+                       headphones,english,experience,country,team_id,added_by,created_at,status)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (invite_id, user_id, kind, a["fio"], a["birth"], a["phone"], a.get("tg") or "",
+                     1 if a.get("hp") else 0, a.get("en") or "", a.get("exp") or "", a.get("country") or "",
+                     team_id or 0, by_id, utcnow(), "pending"))
+
+
+def worker_profile_get(pid: int):
+    with db() as con:
+        return con.execute("SELECT p.*,u.username,u.first_name FROM worker_profiles p LEFT JOIN users u ON u.user_id=p.user_id WHERE p.id=?", (pid,)).fetchone()
+
+def pending_worker_profiles(limit=30):
+    with db() as con:
+        return con.execute("SELECT p.*,u.username,u.first_name FROM worker_profiles p LEFT JOIN users u ON u.user_id=p.user_id WHERE p.status='pending' ORDER BY p.id DESC LIMIT ?", (limit,)).fetchall()
+
+async def notify_admins_profile(bot: Bot, pid: int):
+    p = worker_profile_get(pid)
+    if not p: return
+    text = f"🪪 <b>Новая анкета #{pid}</b>\n{esc(p['full_name'])} · {esc(KIND_TITLES.get(p['kind'], p['kind']))}\nТелефон: {esc(p['phone'])}\nUsername: @{esc(p['tg_username'] or '—')}\nСтатус: ⏳ на рассмотрении"
+    for aid in ADMIN_IDS:
+        await safe_send(bot, aid, text, reply_markup=kb([[btn("Открыть анкету", f"adm:wp:{pid}")]]))
+
+def profile_of(uid: int):
+    with db() as con:
+        return con.execute("SELECT * FROM worker_profiles WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                           (uid,)).fetchone()
+
+
+def profile_card(p) -> str:
+    return "<b>Анкета</b>\n" + fmt_anketa({
+        "fio": p["full_name"], "birth": p["birth_date"], "phone": p["phone"],
+        "tg": p["tg_username"], "hp": p["headphones"], "en": p["english"], "exp": p["experience"],
+        "country": p["country"]})
+
+
+# ======================= ПРИВЕСТИ НОВОГО РАБОТНИКА (анкета) =======================
+class BringFSM(StatesGroup):
+    fio = State()
+    birth = State()
+    phone = State()
+    tg = State()
+    en = State()
+    exp = State()
+    hp = State()
+    country = State()
+    confirm = State()
+
+
+BW_ORDER = ["fio", "birth", "phone", "tg", "en", "exp", "hp", "country"]
+BW_STATE = {"fio": BringFSM.fio, "birth": BringFSM.birth, "phone": BringFSM.phone, "tg": BringFSM.tg,
+            "en": BringFSM.en, "exp": BringFSM.exp, "hp": BringFSM.hp, "country": BringFSM.country}
+BW_PROMPT = {
+    "fio": "Фамилия и имя работника (например: <i>Иванов Иван</i>)",
+    "birth": "Дата рождения в формате <i>ДД.ММ.ГГГГ</i>",
+    "phone": "Номер телефона (например: <i>+7 900 123-45-67</i>)",
+    "tg": "Username в Telegram, например <i>@ivan_petrov</i>.\nПо нему бот узнает человека, когда тот его запустит.",
+    "en": "Уровень английского",
+    "exp": "Опыт работы (коротко: где и сколько). Если опыта нет — нажмите кнопку.",
+    "hp": "Есть ли у работника наушники?",
+    "country": "В какой стране живёт работник?",
+}
+BW_KIND_LABEL = {"scout": "🔎 Скаут", "operator": "🎧 Оператор", "model": "📸 Модель"}
+
+
+def _bw_head(d: dict) -> str:
+    team = f"команда «{esc(d['tname'])}»" if d.get("tname") else "без команды"
+    return f"🆕 <b>Новый работник</b> · {BW_KIND_LABEL[d['kind']]} · {team}"
+
+
+def _bw_filled(d: dict) -> str:
+    L = []
+    if d.get("fio"):
+        L.append(f"👤 {esc(d['fio'])}")
+    if d.get("birth"):
+        b = date.fromisoformat(d["birth"])
+        L.append(f"🎂 {b.strftime('%d.%m.%Y')} ({age_from(b)} {years_word(age_from(b))})")
+    if d.get("phone"):
+        L.append(f"📞 {esc(d['phone'])}")
+    if d.get("_tg_done"):
+        L.append(f"✈️ {('@' + esc(d['tg'])) if d.get('tg') else 'нет username'}")
+    if d.get("en"):
+        L.append(f"🗣 {esc(d['en'])}")
+    if d.get("exp"):
+        L.append(f"💼 {esc(d['exp'][:80])}")
+    if "hp" in d:
+        L.append(f"🎧 Наушники: {'есть' if d['hp'] else 'нет'}")
+    return "\n".join(L)
+
+
+def bw_text(step: str, d: dict, err: str = "") -> str:
+    n = BW_ORDER.index(step) + 1
+    filled = _bw_filled(d)
+    return (_bw_head(d) + "\n\n" + (filled + "\n\n" if filled else "") +
+            (f"⚠️ {err}\n\n" if err else "") + f"<b>Шаг {n}/{len(BW_ORDER)}.</b> {BW_PROMPT[step]}")
+
+
+def bw_kb(step: str, d: dict):
+    rows = []
+    if step == "tg":
+        rows.append([btn("Нет username", "bw:notg")])
+    if step == "en":
+        rows += [[btn(lv, f"bw:en:{i}")] for i, lv in enumerate(ENGLISH_LEVELS)]
+    if step == "exp":
+        rows.append([btn("Нет опыта", "bw:noexp")])
+    if step == "hp":
+        rows.append([btn("🎧 Есть", "bw:hp:1"), btn("🚫 Нет", "bw:hp:0")])
+    if step == "birth" and d.get("birth_young"):
+        rows.append([btn("🔎 Оформить как скаута", "bw:swk")])
+    nav = []
+    if step != "fio":
+        nav.append(btn("⬅️ Назад", "bw:back"))
+    nav.append(btn("❌ Отмена", "bw:x"))
+    rows.append(nav)
+    return kb(rows)
+
+
+def bw_confirm_text(d: dict) -> str:
+    return (_bw_head(d) + "\n\n" + fmt_anketa(d) + "\n\n<b>Всё верно?</b> После подтверждения бот запомнит "
+            "работника и сам определит его в нужную команду, когда он зайдёт.")
+
+
+def _kind_picker_bw(tid: int, tname: str):
+    team = f"Команда: «{esc(tname)}»" if tid else "Команда: без команды"
+    return (f"🆕 <b>Привести работника</b>\n{team}\n\nКого оформляем?\n"
+            f"<i>Скаутом можно работать с любого возраста, оператором и моделью — с 18 лет.</i>",
+            kb([[btn(BW_KIND_LABEL[k], f"bw:k:{tid}:{k}") for k in KIND_TITLES], [btn("⬅️ Отмена", "bw:x")]]))
+
+
+async def bw_begin(target, user, state: FSMContext):
     await state.clear()
     touch_user(user)
     uid = user.id
     u = get_user(uid)
     if not is_admin(uid) and (not u or u["rank"] not in ADDER_RANKS):
-        await show(target, "Добавлять работников могут скауты и тимлиды.", kb([[btn("👤 Профиль", "prof:me")]]))
+        await show(target, "Приводить работников могут скауты и тимлиды.", kb([[btn("👤 Профиль", "prof:me")]]))
         return
     teams = addable_teams(uid)
-    if not teams:
-        rows = [] if is_admin(uid) else [[btn("🙋 Запросить команду", "tr:start")]]
-        rows.append([btn("👤 Профиль", "prof:me")])
-        await show(target, "У вас пока нет команды, поэтому добавлять людей некуда."
-                           + ("" if is_admin(uid) else "\nЗапросите создание команды — администратор рассмотрит заявку."),
-                   kb(rows))
-    elif len(teams) == 1:
-        text, markup = _kind_picker(teams[0])
+    if not is_admin(uid) and len(teams) <= 1:
+        t = teams[0] if teams else None
+        text, markup = _kind_picker_bw(t["id"] if t else 0, t["name"] if t else "")
         await show(target, text, markup)
-    else:
-        rows = [[btn(t["name"][:50], f"aw:t:{t['id']}")] for t in teams[:40]]
-        rows.append([btn("⬅️ Отмена", "aw:x")])
-        await show(target, "➕ <b>Добавить работника</b>\nВ какую команду?", kb(rows))
+        return
+    rows = [[btn(t["name"][:50], f"bw:t:{t['id']}")] for t in teams[:40]]
+    if is_admin(uid):
+        rows.append([btn("Без команды", "bw:t:0")])
+    rows.append([btn("⬅️ Отмена", "bw:x")])
+    await show(target, "🆕 <b>Привести работника</b>\nВ какую команду?", kb(rows))
 
 
 @router.message(Command("addworker"))
 async def cmd_addworker(message: Message, state: FSMContext):
-    await aw_begin(message, message.from_user, state)
+    await bw_begin(message, message.from_user, state)
 
 
-@router.callback_query(F.data == "aw:start")
-async def cb_aw_start(cb: CallbackQuery, state: FSMContext):
-    await aw_begin(cb, cb.from_user, state)
+@router.callback_query(F.data.in_({"bw:start", "aw:start"}))
+async def cb_bw_start(cb: CallbackQuery, state: FSMContext):
+    await bw_begin(cb, cb.from_user, state)
     await cb.answer()
 
 
-@router.callback_query(F.data == "aw:x")
-async def cb_aw_cancel(cb: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "bw:x")
+async def cb_bw_cancel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await show_profile(cb, cb.from_user.id, cb.from_user.id)
-    await cb.answer()
+    text, markup = team_hub(cb.from_user.id)
+    await show(cb, text, markup)
+    await cb.answer("Отменено")
 
 
-@router.callback_query(F.data.regexp(r"^aw:t:\d+$"))
-async def cb_aw_team(cb: CallbackQuery, state: FSMContext):
+def _team_for(uid: int, tid: int):
+    if not tid:
+        return None
+    return next((t for t in addable_teams(uid) if t["id"] == tid), None)
+
+
+@router.callback_query(F.data.regexp(r"^bw:t:\d+$"))
+async def cb_bw_team(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     tid = int(cb.data.split(":")[2])
-    team = next((t for t in addable_teams(cb.from_user.id) if t["id"] == tid), None)
-    if not team:
+    team = _team_for(cb.from_user.id, tid)
+    if tid and not team:
         await cb.answer("Нет прав на эту команду.", show_alert=True)
         return
-    text, markup = _kind_picker(team)
+    if not tid and not is_admin(cb.from_user.id):
+        await cb.answer("Выберите команду.", show_alert=True)
+        return
+    text, markup = _kind_picker_bw(tid, team["name"] if team else "")
     await show(cb, text, markup)
     await cb.answer()
 
 
-@router.callback_query(F.data.regexp(r"^aw:k:\d+:(scout|operator|model)$"))
-async def cb_aw_kind(cb: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.regexp(r"^bw:k:\d+:(scout|operator|model)$"))
+async def cb_bw_kind(cb: CallbackQuery, state: FSMContext):
     _, _, tid, kind = cb.data.split(":")
     tid = int(tid)
-    team = next((t for t in addable_teams(cb.from_user.id) if t["id"] == tid), None)
-    if not team:
+    team = _team_for(cb.from_user.id, tid)
+    if tid and not team:
         await cb.answer("Нет прав на эту команду.", show_alert=True)
         return
-    await state.set_state(WorkerFSM.ident)
-    await state.update_data(tid=tid, kind=kind)
-    await show(cb, f"➕ Добавляем: <b>{KIND_ICONS[kind]} {KIND_TITLES[kind]}</b> · команда «{esc(team['name'])}»\n\n"
-                   f"Отправьте <b>@username</b> или ID человека.\n"
-                   f"Если он ещё не запускал бота — сохраню приглашение и дам личную ссылку.\n/cancel — отмена.",
-               kb([[btn("⬅️ Назад", f"aw:t:{tid}"), btn("❌ Отмена", "aw:x")]]))
+    if not tid and not is_admin(cb.from_user.id) and addable_teams(cb.from_user.id):
+        await cb.answer("Выберите команду.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(tid=tid, tname=team["name"] if team else "", kind=kind, mid=cb.message.message_id)
+    await _bw_goto(cb.bot, cb.message.chat.id, state, "fio")
     await cb.answer()
 
 
-@router.message(WorkerFSM.ident, F.text, ~F.text.startswith("/"))
-async def aw_ident(message: Message, state: FSMContext):
+async def _bw_goto(bot: Bot, chat_id: int, state: FSMContext, step: str, err: str = ""):
+    await state.set_state(BW_STATE[step])
     d = await state.get_data()
-    tid, kind = d.get("tid"), d.get("kind")
-    if not tid or not kind:
-        await state.clear()
-        await message.answer("Сессия устарела — начните заново: /addworker")
+    await _wizard_show(bot, chat_id, state, bw_text(step, d, err), bw_kb(step, d))
+
+
+async def _bw_confirm(bot: Bot, chat_id: int, state: FSMContext):
+    await state.set_state(BringFSM.confirm)
+    d = await state.get_data()
+    await _wizard_show(bot, chat_id, state, bw_confirm_text(d),
+                       kb([[btn("✅ Добавить", "bw:ok")],
+                           [btn("⬅️ Назад", "bw:back"), btn("❌ Отмена", "bw:x")]]))
+
+
+async def _bw_input(bot: Bot, chat_id: int, state: FSMContext, raw: str):
+    step = (await state.get_state()).split(":")[1]
+    d = await state.get_data()
+    if step == "fio":
+        v = parse_fio(raw)
+        if not v:
+            await _bw_goto(bot, chat_id, state, step, "Нужны фамилия и имя без цифр, например: Иванов Иван.")
+            return
+        await state.update_data(fio=v)
+    elif step == "birth":
+        b = parse_birth(raw)
+        if not b:
+            await _bw_goto(bot, chat_id, state, step, "Не понял дату. Формат: ДД.ММ.ГГГГ, например 07.03.2004.")
+            return
+        prob = age_problem(d["kind"], age_from(b))
+        if prob:
+            await state.update_data(birth=b.isoformat(), birth_young=d["kind"] != "scout" and age_from(b) >= 10)
+            await _bw_goto(bot, chat_id, state, step, prob)
+            return
+        await state.update_data(birth=b.isoformat(), birth_young=False)
+    elif step == "phone":
+        v = parse_phone(raw)
+        if not v:
+            await _bw_goto(bot, chat_id, state, step, "Не похоже на номер телефона. Пример: +7 900 123-45-67.")
+            return
+        await state.update_data(phone=v)
+    elif step == "tg":
+        v = parse_username(raw)
+        if not v:
+            await _bw_goto(bot, chat_id, state, step,
+                           "Не похоже на username. Пример: @ivan_petrov (от 5 символов). Или нажмите «Нет username».")
+            return
+        await state.update_data(tg=v, _tg_done=True)
+    elif step == "exp":
+        v = parse_exp(raw)
+        if not v:
+            await _bw_goto(bot, chat_id, state, step, "Опишите опыт текстом (до 800 символов) или нажмите «Нет опыта».")
+            return
+        await state.update_data(exp=v)
+    elif step == "country":
+        v = parse_country(raw)
+        if not v:
+            await _bw_goto(bot, chat_id, state, step, "Напишите название страны, например: Россия.")
+            return
+        await state.update_data(country=v)
+        await _bw_confirm(bot, chat_id, state)
         return
-    res = await add_worker(message.bot, message.from_user.id, tid, kind, message.text)
+    else:  # en, hp — ответ только кнопками
+        await _bw_goto(bot, chat_id, state, step, "Выберите ответ кнопкой.")
+        return
+    await _bw_goto(bot, chat_id, state, BW_ORDER[BW_ORDER.index(step) + 1])
+
+
+BW_TEXT_STATES = StateFilter(*BW_STATE.values())
+
+
+@router.message(BW_TEXT_STATES, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
+async def bw_typed(message: Message, state: FSMContext):
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+    await _bw_input(message.bot, message.chat.id, state, message.text)
+
+
+@router.callback_query(BringFSM.tg, F.data == "bw:notg")
+async def cb_bw_notg(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(tg="", _tg_done=True)
+    await _bw_goto(cb.bot, cb.message.chat.id, state, "hp")
+    await cb.answer()
+
+
+@router.callback_query(BringFSM.en, F.data.regexp(r"^bw:en:\d$"))
+async def cb_bw_en(cb: CallbackQuery, state: FSMContext):
+    i = int(cb.data.split(":")[2])
+    if i >= len(ENGLISH_LEVELS):
+        await cb.answer()
+        return
+    await state.update_data(en=ENGLISH_LEVELS[i])
+    await _bw_goto(cb.bot, cb.message.chat.id, state, "exp")
+    await cb.answer()
+
+
+@router.callback_query(BringFSM.exp, F.data == "bw:noexp")
+async def cb_bw_noexp(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(exp="Нет опыта")
+    await _bw_goto(cb.bot, cb.message.chat.id, state, "hp")
+    await cb.answer()
+
+
+@router.callback_query(BringFSM.hp, F.data.regexp(r"^bw:hp:[01]$"))
+async def cb_bw_hp(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(hp=cb.data.endswith("1"))
+    await _bw_goto(cb.bot, cb.message.chat.id, state, "country")
+    await cb.answer()
+
+
+@router.callback_query(BringFSM.birth, F.data == "bw:swk")
+async def cb_bw_swk(cb: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    if not d.get("birth"):
+        await cb.answer("Сначала введите дату рождения.", show_alert=True)
+        return
+    await state.update_data(kind="scout", birth_young=False)
+    await _bw_goto(cb.bot, cb.message.chat.id, state, "phone")
+    await cb.answer("Оформляем как скаута")
+
+
+@router.callback_query(F.data == "bw:back")
+async def cb_bw_back(cb: CallbackQuery, state: FSMContext):
+    cur = await state.get_state()
+    if cur == BringFSM.confirm.state:
+        step = "country"
+    elif cur in {s.state for s in BW_STATE.values()}:
+        step = BW_ORDER[max(0, BW_ORDER.index(cur.split(":")[1]) - 1)]
+    else:
+        await cb.answer("Форма уже закрыта.", show_alert=True)
+        return
+    await _bw_goto(cb.bot, cb.message.chat.id, state, step)
+    await cb.answer()
+
+
+@router.callback_query(BringFSM.confirm, F.data == "bw:ok")
+async def cb_bw_ok(cb: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    await state.clear()
+    if not all(d.get(k) for k in ("fio", "birth", "phone", "kind", "en", "exp", "country")):
+        await cb.answer("Сессия устарела — начните заново.", show_alert=True)
+        return
+    res = await bring_worker(cb.bot, cb.from_user.id, d.get("tid", 0), d["kind"],
+                             {"fio": d["fio"], "birth": d["birth"], "phone": d["phone"],
+                              "tg": d.get("tg") or "", "hp": bool(d.get("hp")), "en": d["en"],
+                              "exp": d["exp"], "country": d["country"]})
+    await show(cb, res["text"], kb([[btn("🆕 Привести ещё", "bw:start"), btn("👥 Команда", "team:hub")]]))
+    await cb.answer("Готово ✅" if res["ok"] else "Не получилось")
+
+
+@router.callback_query(F.data.startswith(("bw:hp:", "bw:en:", "bw:noexp", "bw:ok", "bw:notg", "bw:swk")))
+async def cb_bw_stale(cb: CallbackQuery):
+    await cb.answer("Эта форма уже закрыта. Начните заново: «🆕 Привести работника».", show_alert=True)
+
+
+async def bring_worker(bot: Bot, by_id: int, team_id: int, kind: str, a: dict) -> dict:
+    """Привести НОВОГО работника по анкете. team_id=0 — без команды (если у приводящего её нет).
+    Возвращает {ok, status: added|invited|error, text (HTML), link}."""
+    if kind not in KIND_TITLES:
+        return _err("Неизвестная роль.")
+    adder = get_user(by_id)
+    if not is_admin(by_id) and (not adder or adder["rank"] not in ADDER_RANKS):
+        return _err("Приводить работников могут скауты и тимлиды.")
+    team = None
+    if team_id:
+        team = next((t for t in addable_teams(by_id) if t["id"] == team_id), None)
+        if not team:
+            return _err("Нет прав добавлять людей в эту команду.")
+    elif not is_admin(by_id) and addable_teams(by_id):
+        return _err("Выберите команду.")
+    prob = age_problem(kind, age_from(date.fromisoformat(a["birth"])))
+    if prob:
+        return _err(prob)
+    uname = (a.get("tg") or "").lower()
+    tname = esc(team["name"]) if team else ""
+    where = f"в команду «{tname}»" if team else "без команды"
+    target = find_user(uname) if uname else None
+
+    if target:
+        tid = target["user_id"]
+        if tid == by_id:
+            return _err("Себя добавлять не нужно.")
+        if is_admin(tid):
+            return _err("Администратора добавить нельзя.")
+        if is_banned(tid, target["username"]):
+            return _err("Доступ этого пользователя к боту ограничен.")
+        if target["rank"] or member_team(tid):
+            return _err(f"{who(target)} уже работает в проекте ({esc(rank_label(target['rank'], target['level']))}). "
+                        f"Чтобы позвать его в свою команду, нажмите «➕ Добавить в команду».")
+        try:
+            save_profile(a, kind, team_id, by_id, user_id=tid)
+        except ValueError as e:
+            return _err(str(e))
+        prof = profile_of(tid)
+        if prof:
+            await notify_admins_profile(bot, prof["id"])
+        row = get_user(tid)
+        label = esc(rank_label(row["rank"], row["level"]))
+        await safe_send(bot, tid, f"✅ {who(adder, by_id)} оформил(а) вас: <b>{label}</b>"
+                                  + (f", команда «{tname}»." if team else ".")
+                                  + "\nОтчёт за день — кнопка «📝 Отчёт».", reply_markup=main_menu_kb(tid))
+        if team and team["leader_id"] not in (by_id, tid):
+            await safe_send(bot, team["leader_id"], f"➕ {who(adder, by_id)} привёл(а) в вашу команду «{tname}»: "
+                                                    f"{esc(a['fio'])} ({who(row)}) · {label}.")
+        return {"ok": True, "status": "added", "retry": False, "link": None,
+                "text": f"✅ {esc(a['fio'])} ({who(row)}) добавлен(а) {where} · <b>{label}</b>."}
+
+    with db() as con:
+        open_n = con.execute("SELECT COUNT(*) n FROM invites WHERE added_by=? AND claimed_by IS NULL",
+                             (by_id,)).fetchone()["n"]
+        ex = con.execute("SELECT * FROM invites WHERE username=? AND team_id=? AND claimed_by IS NULL",
+                         (uname, team_id or 0)).fetchone() if uname else None
+        if ex:
+            return _err(f"@{esc(uname)} уже приглашён(а) — ждём, пока запустит бота.")
+        if open_n >= MAX_OPEN_INVITES:
+            return _err(f"Слишком много неиспользованных приглашений ({MAX_OPEN_INVITES}). "
+                        f"Дождитесь, пока люди запустят бота.")
+        token = secrets.token_hex(6)
+        iid = con.execute("""INSERT INTO invites(token,username,kind,team_id,added_by,created_at)
+                             VALUES(?,?,?,?,?,?)""", (token, uname, kind, team_id or 0, by_id, utcnow())).lastrowid
+    try:
+        save_profile(a, kind, team_id, by_id, invite_id=iid)
+    except ValueError as e:
+        with db() as con: con.execute("DELETE FROM invites WHERE id=?", (iid,))
+        return _err(str(e))
+    prof = None
+    with db() as con:
+        prof = con.execute("SELECT id FROM worker_profiles WHERE invite_id=? ORDER BY id DESC LIMIT 1", (iid,)).fetchone()
+    if prof: await notify_admins_profile(bot, prof["id"])
+    link = invite_link(token)
+    text = (f"✅ <b>Анкета сохранена</b>\n{fmt_anketa(a)}\n\n"
+            f"Роль: <b>{KIND_TITLES[kind]}</b> · {where}.\n\n")
+    if uname:
+        text += f"Как только @{esc(uname)} запустит бота, он сам окажется на своём месте. "
+    text += f"Или отправьте человеку личную одноразовую ссылку:\n<code>{link}</code>"
+    return {"ok": True, "status": "invited", "retry": False, "text": text, "link": link}
+
+
+# ======================= ДОБАВИТЬ СОТРУДНИКА В КОМАНДУ (приглашение) =======================
+JOIN_TTL_DAYS = 7
+MAX_PENDING_JOINS = 30
+
+
+class JoinFSM(StatesGroup):
+    ident = State()
+
+
+def join_invite_get(iid: int):
+    with db() as con:
+        return con.execute("SELECT * FROM team_invites WHERE id=?", (iid,)).fetchone()
+
+
+def _join_expired(inv) -> bool:
+    try:
+        return datetime.fromisoformat(inv["created_at"]) < datetime.now(timezone.utc) - timedelta(days=JOIN_TTL_DAYS)
+    except (TypeError, ValueError):
+        return False
+
+
+async def create_join_invite(bot: Bot, by_id: int, team_id: int, ident_text: str) -> dict:
+    """Приглашение УЖЕ работающего сотрудника в команду. Человек должен принять (или отказаться)."""
+    team = next((t for t in addable_teams(by_id) if t["id"] == team_id), None)
+    if not team:
+        return _err("Нет прав приглашать в эту команду.")
+    parsed = parse_ident(ident_text)
+    if not parsed:
+        return _err("Не похоже на @username или ID. Пример: <code>@ivan_petrov</code>.", retry=True)
+    target = get_user(parsed[1]) if parsed[0] == "id" else find_user(parsed[1])
+    if not target:
+        return _err("Этого человека нет в боте. Если он новый — нажмите «🆕 Привести работника» "
+                    "и заполните анкету.")
+    tid = target["user_id"]
+    if tid == by_id:
+        return _err("Себя приглашать не нужно.", retry=True)
+    if is_admin(tid):
+        return _err("Администратора пригласить нельзя.")
+    if is_banned(tid, target["username"]):
+        return _err("Доступ этого пользователя к боту ограничен.")
+    if not target["rank"]:
+        return _err(f"{who(target)} ещё не оформлен(а) как сотрудник. Для новых людей — "
+                    f"«🆕 Привести работника».")
+    if teams_led_by(tid) or target["rank"] in LEADER_RANKS:
+        return _err(f"{who(target)} — тимлид, переводит его администратор.")
+    cur = member_team(tid)
+    if cur and cur["id"] == team_id:
+        return _err(f"{who(target)} уже в команде «{esc(team['name'])}».")
+    with db() as con:
+        pend = con.execute("SELECT COUNT(*) n FROM team_invites WHERE invited_by=? AND status='pending'",
+                           (by_id,)).fetchone()["n"]
+        dup = con.execute("SELECT * FROM team_invites WHERE user_id=? AND team_id=? AND status='pending'",
+                          (tid, team_id)).fetchone()
+        if dup and not _join_expired(dup):
+            return _err(f"Приглашение для {who(target)} уже отправлено — ждём ответа.")
+        if pend >= MAX_PENDING_JOINS:
+            return _err("Слишком много приглашений без ответа. Дождитесь ответов.")
+        iid = con.execute("INSERT INTO team_invites(team_id,user_id,invited_by,status,created_at) "
+                          "VALUES(?,?,?,'pending',?)", (team_id, tid, by_id, utcnow())).lastrowid
+    inviter = get_user(by_id)
+    note = f"\n<i>Сейчас вы в команде «{esc(cur['name'])}».</i>" if cur else ""
+    ok = await safe_send(bot, tid, f"📨 {who(inviter, by_id)} приглашает вас в команду «{esc(team['name'])}».{note}",
+                         reply_markup=kb([[btn("✅ Подтвердить", f"jt:ok:{iid}"), btn("❌ Отказаться", f"jt:no:{iid}")]]))
+    if not ok:
+        with db() as con:
+            con.execute("DELETE FROM team_invites WHERE id=?", (iid,))
+        return _err(f"Не удалось отправить приглашение: {who(target)} недоступен(на) для бота.")
+    return {"ok": True, "status": "invited", "retry": False, "link": None,
+            "text": f"📨 Приглашение отправлено: {who(target)} → «{esc(team['name'])}».\n"
+                    f"Я напишу вам, когда человек ответит."}
+
+
+async def jt_begin(target, user, state: FSMContext):
+    await state.clear()
+    touch_user(user)
+    uid = user.id
+    u = get_user(uid)
+    if not is_admin(uid) and (not u or u["rank"] not in ADDER_RANKS):
+        await show(target, "Приглашать в команду могут скауты и тимлиды.", kb([[btn("👤 Профиль", "prof:me")]]))
+        return
+    teams = addable_teams(uid)
+    if not teams:
+        rows = [[btn("🆕 Привести работника", "bw:start")]]
+        if u and u["rank"] in REQUESTER_RANKS and not is_admin(uid):
+            rows.append([btn("🙋 Запросить команду", "tr:start")])
+        rows.append([btn("👤 Профиль", "prof:me")])
+        await show(target, "У вас пока нет команды, куда можно пригласить сотрудника.\n"
+                           "Новых людей можно привести и без команды — по анкете.", kb(rows))
+    elif len(teams) == 1:
+        await _jt_ask(target, state, teams[0])
+    else:
+        rows = [[btn(t["name"][:50], f"jt:t:{t['id']}")] for t in teams[:40]]
+        rows.append([btn("⬅️ Отмена", "jt:x")])
+        await show(target, "➕ <b>Добавить в команду</b>\nВ какую команду приглашаем?", kb(rows))
+
+
+async def _jt_ask(target, state: FSMContext, team: dict):
+    await state.set_state(JoinFSM.ident)
+    await state.update_data(tid=team["id"])
+    await show(target, f"➕ <b>Добавить в команду «{esc(team['name'])}»</b>\n\n"
+                       f"Отправьте <b>@username</b> или ID сотрудника, который уже работает в боте. "
+                       f"Ему придёт приглашение — он подтвердит или откажется.\n"
+                       f"<i>Нового человека так не добавить — для него есть «🆕 Привести работника».</i>",
+               kb([[btn("🆕 Привести нового", "bw:start"), btn("❌ Отмена", "jt:x")]]))
+
+
+@router.message(Command("addmember"))
+async def cmd_addmember(message: Message, state: FSMContext):
+    await jt_begin(message, message.from_user, state)
+
+
+@router.callback_query(F.data == "jt:start")
+async def cb_jt_start(cb: CallbackQuery, state: FSMContext):
+    await jt_begin(cb, cb.from_user, state)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "jt:x")
+async def cb_jt_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text, markup = team_hub(cb.from_user.id)
+    await show(cb, text, markup)
+    await cb.answer("Отменено")
+
+
+@router.callback_query(F.data.regexp(r"^jt:t:\d+$"))
+async def cb_jt_team(cb: CallbackQuery, state: FSMContext):
+    tid = int(cb.data.split(":")[2])
+    team = _team_for(cb.from_user.id, tid)
+    if not team:
+        await cb.answer("Нет прав на эту команду.", show_alert=True)
+        return
+    await _jt_ask(cb, state, team)
+    await cb.answer()
+
+
+@router.message(JoinFSM.ident, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
+async def jt_ident(message: Message, state: FSMContext):
+    tid = (await state.get_data()).get("tid")
+    if not tid:
+        await state.clear()
+        await message.answer("Сессия устарела — начните заново: /addmember")
+        return
+    res = await create_join_invite(message.bot, message.from_user.id, tid, message.text)
     if res["retry"]:
         await message.answer(res["text"])
         return
     await state.clear()
-    await message.answer(res["text"], reply_markup=kb([[btn("➕ Добавить ещё", f"aw:t:{tid}"),
-                                                         btn("👤 Профиль", "prof:me")]]))
+    await message.answer(res["text"], reply_markup=kb([[btn("➕ Ещё сотрудника", f"jt:t:{tid}"),
+                                                        btn("👥 Команда", "team:hub")]]))
+
+
+async def _jt_load(cb: CallbackQuery, iid: int):
+    """Приглашение, которое ещё можно принять этим человеком, иначе None (и пользователь уведомлён)."""
+    inv = join_invite_get(iid)
+    if not inv or inv["user_id"] != cb.from_user.id:
+        await cb.answer("Это приглашение вам не адресовано.", show_alert=True)
+        return None
+    if inv["status"] != "pending" or _join_expired(inv) or not team_by_id(inv["team_id"]):
+        if inv["status"] == "pending":
+            _jt_close(iid, "expired")
+        await show(cb, "Приглашение уже неактуально.", None)
+        await cb.answer()
+        return None
+    return inv
+
+
+def _jt_close(iid: int, status: str):
+    with db() as con:
+        con.execute("UPDATE team_invites SET status=?, answered_at=? WHERE id=?", (status, utcnow(), iid))
+
+
+async def _jt_finish(cb: CallbackQuery, inv):
+    team = team_by_id(inv["team_id"])
+    uid = cb.from_user.id
+    old = member_team(uid)
+    if old and old["id"] != team["id"]:
+        remove_member(uid)
+    add_member(uid, team["id"], via_ref=0, added_by=inv["invited_by"])
+    _jt_close(inv["id"], "accepted")
+    row = get_user(uid)
+    await show(cb, f"✅ Вы в команде «{esc(team['name'])}».", None)
+    await cb.message.answer("Отчёт за день — кнопка «📝 Отчёт».", reply_markup=main_menu_kb(uid))
+    await safe_send(cb.bot, inv["invited_by"], f"✅ {who(row)} принял(а) приглашение в команду «{esc(team['name'])}».")
+    if team["leader_id"] not in (inv["invited_by"], uid):
+        await safe_send(cb.bot, team["leader_id"], f"➕ В вашу команду «{esc(team['name'])}» вступил(а) {who(row)}.")
+    if old and old["id"] != team["id"] and old["leader_id"] not in (uid, team["leader_id"]):
+        await safe_send(cb.bot, old["leader_id"], f"➖ {who(row)} перешёл(перешла) из вашей команды "
+                                                  f"«{esc(old['name'])}» в «{esc(team['name'])}».")
+
+
+@router.callback_query(F.data.regexp(r"^jt:ok:\d+$"))
+async def cb_jt_ok(cb: CallbackQuery):
+    inv = await _jt_load(cb, int(cb.data.split(":")[2]))
+    if not inv:
+        return
+    old = member_team(cb.from_user.id)
+    team = team_by_id(inv["team_id"])
+    if old and old["id"] != team["id"]:
+        await show(cb, f"Сейчас вы в команде «{esc(old['name'])}».\nТочно выйти из неё и перейти в "
+                       f"«{esc(team['name'])}»?",
+                   kb([[btn("✅ Да, перейти", f"jt:yes:{inv['id']}"), btn("🚫 Нет, остаться", f"jt:no:{inv['id']}")]]))
+        await cb.answer()
+        return
+    await _jt_finish(cb, inv)
+    await cb.answer("Готово ✅")
+
+
+@router.callback_query(F.data.regexp(r"^jt:yes:\d+$"))
+async def cb_jt_yes(cb: CallbackQuery):
+    inv = await _jt_load(cb, int(cb.data.split(":")[2]))
+    if not inv:
+        return
+    await _jt_finish(cb, inv)
+    await cb.answer("Готово ✅")
+
+
+@router.callback_query(F.data.regexp(r"^jt:no:\d+$"))
+async def cb_jt_no(cb: CallbackQuery):
+    inv = await _jt_load(cb, int(cb.data.split(":")[2]))
+    if not inv:
+        return
+    _jt_close(inv["id"], "declined")
+    team = team_by_id(inv["team_id"])
+    await show(cb, "Хорошо, вы остаётесь там, где были. Приглашение отклонено.", None)
+    await safe_send(cb.bot, inv["invited_by"], f"❌ {who(get_user(cb.from_user.id), cb.from_user.id)} отказался(лась) "
+                                               f"от приглашения в «{esc(team['name'])}».")
+    await cb.answer()
 
 
 # ======================= ЗАПРОС НОВОЙ КОМАНДЫ =======================
@@ -3029,7 +3822,7 @@ def can_request_team(uid: int):
         return False, "Администратор создаёт команды в админ-панели."
     u = get_user(uid)
     if not u or u["rank"] not in REQUESTER_RANKS:
-        return False, "Запросить команду могут скауты и тимлиды."
+        return False, "Запросить команду может младший тимлид. Скауты работают в команде своего лидера."
     last = latest_team_request(uid)
     if last and last["status"] == "pending":
         return False, f"Ваша заявка на команду «{last['name']}» уже на рассмотрении."
