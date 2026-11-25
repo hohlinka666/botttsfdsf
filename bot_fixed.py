@@ -833,6 +833,9 @@ async def set_commands():
 async def main():
     init_db()
     init_team_db()
+    # Аддитивные таблицы Mini App / финансов создаются поверх существующей SQLite.
+    from webapp import init_agency_extensions
+    init_agency_extensions()
     dp.include_router(main_router)
     await setup_teams(dp, bot, main_kb)
     dp.include_router(fallback_router)

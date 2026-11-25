@@ -799,6 +799,17 @@ async def handle_start_payload(message: Message, args: Optional[str], state: FSM
     if args == "report":
         await begin_report(message, user.id, state)
         return True
+    if args.startswith("agency_"):
+        code = args[7:]
+        touch_user(user)
+        with db() as con:
+            link = con.execute("SELECT * FROM agency_ref_links WHERE code=? AND active=1", (code,)).fetchone()
+            if link and int(link["inviter_id"]) != int(user.id):
+                con.execute("INSERT OR IGNORE INTO agency_referrals(code,inviter_id,invited_id,role,status,created_at,reward_cents) VALUES(?,?,?,?,?,?,?)", (code, link["inviter_id"], user.id, link["role"], "registered", utcnow(), 1000 if link["role"]=="scout" else 5000))
+                if con.execute("SELECT changes()").fetchone()[0]:
+                    con.execute("INSERT INTO agency_notifications(user_id,title,body,category,created_at) VALUES(?,?,?,?,?)", (link["inviter_id"], "Новая регистрация по вашей ссылке", f"Пользователь @{user.username or user.id} зарегистрировался как {KIND_TITLES.get(link['role'],link['role'])}. Вознаграждение после начала работы и подтверждения.", "referral", utcnow()))
+        await message.answer("Вы перешли по персональной ссылке VUITTON AGENCY. Подайте заявку на выбранную роль через меню бота.", reply_markup=main_menu_kb(user.id))
+        return True
     if args.startswith("ref_"):
         await join_flow(message, args[4:], user)
         return True

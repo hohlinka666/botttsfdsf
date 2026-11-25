@@ -92,6 +92,42 @@ def _totals(t) -> dict:
     return {"reports": t["n"], "hours": t["h"], "scouts": t["s"], "models": t["m"], "operators": t["o"]}
 
 
+def init_agency_extensions():
+    """Аддитивные таблицы Mini App: общий USD-баланс, операции, выводы, реферальные ссылки, уведомления и задачи."""
+    with T.db() as con:
+        con.execute("CREATE TABLE IF NOT EXISTS agency_wallets (user_id INTEGER PRIMARY KEY, balance_cents INTEGER NOT NULL DEFAULT 0, reserved_cents INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)")
+        con.execute("CREATE TABLE IF NOT EXISTS agency_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, amount_cents INTEGER NOT NULL, kind TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'completed', ref_key TEXT UNIQUE, balance_after_cents INTEGER NOT NULL, created_at TEXT NOT NULL, created_by INTEGER)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_agency_tx_user ON agency_transactions(user_id,id DESC)")
+        con.execute("CREATE TABLE IF NOT EXISTS agency_ref_links (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE, inviter_id INTEGER NOT NULL, role TEXT NOT NULL, created_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1)")
+        con.execute("CREATE TABLE IF NOT EXISTS agency_referrals (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, inviter_id INTEGER NOT NULL, invited_id INTEGER NOT NULL UNIQUE, role TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'registered', created_at TEXT NOT NULL, started_at TEXT, reward_cents INTEGER NOT NULL DEFAULT 0, reward_paid INTEGER NOT NULL DEFAULT 0)")
+        con.execute("CREATE TABLE IF NOT EXISTS agency_withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, amount_cents INTEGER NOT NULL, address TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', txid TEXT DEFAULT '', created_at TEXT NOT NULL, reviewed_by INTEGER, reviewed_at TEXT)")
+        con.execute("CREATE TABLE IF NOT EXISTS agency_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'general', is_read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)")
+        con.execute("CREATE TABLE IF NOT EXISTS agency_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, audience TEXT NOT NULL DEFAULT 'all', target_user INTEGER, created_by INTEGER NOT NULL, created_at TEXT NOT NULL)")
+        con.execute("CREATE TABLE IF NOT EXISTS agency_task_status (task_id INTEGER NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'new', updated_at TEXT NOT NULL, PRIMARY KEY(task_id,user_id))")
+
+
+def _wallet(con, uid):
+    con.execute("INSERT OR IGNORE INTO agency_wallets(user_id,updated_at) VALUES(?,?)", (uid,T.utcnow()))
+    return con.execute("SELECT * FROM agency_wallets WHERE user_id=?",(uid,)).fetchone()
+
+
+def _notify(con, uid, title, body, category='finance'):
+    con.execute("INSERT INTO agency_notifications(user_id,title,body,category,created_at) VALUES(?,?,?,?,?)",(uid,title,body,category,T.utcnow()))
+
+
+def _trc20_valid(address):
+    # TRON addresses use Base58Check: 34 chars, prefix T, decoded payload 0x41 + 20 bytes + 4-byte checksum.
+    alphabet='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+    if not isinstance(address,str) or len(address)!=34 or not address.startswith('T') or any(c not in alphabet for c in address): return False
+    n=0
+    for c in address: n=n*58+alphabet.index(c)
+    raw=n.to_bytes((n.bit_length()+7)//8,'big')
+    raw=b'\x00'*(len(address)-len(address.lstrip('1')))+raw
+    if len(raw)!=25 or raw[0]!=0x41: return False
+    import hashlib as _hashlib
+    return hmac.compare_digest(raw[-4:],_hashlib.sha256(_hashlib.sha256(raw[:-4]).digest()).digest()[:4])
+
+
 async def handle_api(bot, path: str, tg_user: dict, body: dict):
     """Возвращает (http_status, json-словарь)."""
     uid = tg_user["id"]
@@ -253,9 +289,143 @@ async def handle_api(bot, path: str, tg_user: dict, body: dict):
         await T.notify_admins_team_request(bot, rid)
         return 200, {"ok": True, "id": rid}
 
+    if path == "/api/finance":
+        with T.db() as con:
+            w=_wallet(con,uid)
+            tx=con.execute("SELECT * FROM agency_transactions WHERE user_id=? ORDER BY id DESC LIMIT 30",(uid,)).fetchall()
+            wd=con.execute("SELECT * FROM agency_withdrawals WHERE user_id=? ORDER BY id DESC LIMIT 20",(uid,)).fetchall()
+        return 200,{"ok":True,"balance":w["balance_cents"],"reserved":w["reserved_cents"],"available":w["balance_cents"]-w["reserved_cents"],"transactions":[{"id":r["id"],"amount":r["amount_cents"],"kind":r["kind"],"reason":r["reason"],"status":r["status"],"date":T.fmt_dt(r["created_at"])} for r in tx],"withdrawals":[{"id":r["id"],"amount":r["amount_cents"],"address":r["address"],"status":r["status"],"txid":r["txid"],"date":T.fmt_dt(r["created_at"])} for r in wd]}
+
+    if path == "/api/withdraw":
+        try: cents=int(round(float(body.get("amount"))*100))
+        except (ValueError,TypeError): return 400,{"ok":False,"error":"Введите корректную сумму"}
+        address=str(body.get("address") or "").strip()
+        if cents<100 or not _trc20_valid(address): return 400,{"ok":False,"error":"Минимум $1.00. Проверьте адрес USDT TRC20 (Base58Check)."}
+        with T.db() as con:
+            w=_wallet(con,uid)
+            if w["balance_cents"]-w["reserved_cents"]<cents: return 409,{"ok":False,"error":"Недостаточно доступных средств"}
+            cur=con.execute("INSERT INTO agency_withdrawals(user_id,amount_cents,address,created_at) VALUES(?,?,?,?)",(uid,cents,address,T.utcnow()))
+            con.execute("UPDATE agency_wallets SET reserved_cents=reserved_cents+?,updated_at=? WHERE user_id=?",(cents,T.utcnow(),uid))
+            _notify(con,uid,"Заявка на вывод создана",f"${cents/100:.2f} зарезервировано до решения администрации.")
+        for aid in T.ADMIN_IDS: await T.safe_send(bot,aid,f"💸 Заявка на вывод #{cur.lastrowid}: пользователь {uid}, ${cents/100:.2f}\n{T.esc(address)}")
+        return 200,{"ok":True,"id":cur.lastrowid}
+
+    if path == "/api/referrals":
+        with T.db() as con:
+            links=con.execute("SELECT * FROM agency_ref_links WHERE inviter_id=? AND active=1 ORDER BY id DESC",(uid,)).fetchall()
+            refs=con.execute("SELECT * FROM agency_referrals WHERE inviter_id=? ORDER BY id DESC LIMIT 100",(uid,)).fetchall()
+        botname=T._BOT_USERNAME
+        return 200,{"ok":True,"links":[{"role":r["role"],"url":f"https://t.me/{botname}?start=agency_{r['code']}" if botname else "","code":r["code"]} for r in links],"referrals":[{"id":r["id"],"user_id":r["invited_id"],"role":r["role"],"status":r["status"],"reward":r["reward_cents"],"paid":bool(r["reward_paid"]),"date":T.fmt_date(r["created_at"])} for r in refs]}
+
+    if path == "/api/referrals/create":
+        role=str(body.get("role") or "")
+        if role not in ("scout","operator"): return 400,{"ok":False,"error":"Для моделей используется заявка через @vuittonceo"}
+        import secrets as _secrets
+        code=_secrets.token_urlsafe(9).replace('-','a').replace('_','b')
+        with T.db() as con: con.execute("INSERT INTO agency_ref_links(code,inviter_id,role,created_at) VALUES(?,?,?,?)",(code,uid,role,T.utcnow()))
+        url=f"https://t.me/{T._BOT_USERNAME}?start=agency_{code}" if T._BOT_USERNAME else ""
+        return 200,{"ok":True,"url":url}
+
+    if path == "/api/notifications":
+        with T.db() as con: rows=con.execute("SELECT * FROM agency_notifications WHERE user_id=? ORDER BY id DESC LIMIT 100",(uid,)).fetchall()
+        return 200,{"ok":True,"items":[{"id":r["id"],"title":r["title"],"body":r["body"],"category":r["category"],"read":bool(r["is_read"]),"date":T.fmt_dt(r["created_at"])} for r in rows]}
+
+    if path == "/api/notifications/read":
+        with T.db() as con: con.execute("UPDATE agency_notifications SET is_read=1 WHERE id=? AND user_id=?",(_int(body.get("id")),uid))
+        return 200,{"ok":True}
+
+    if path == "/api/tasks":
+        with T.db() as con:
+            rows=con.execute("SELECT t.*,COALESCE(s.status,'new') AS status FROM agency_tasks t LEFT JOIN agency_task_status s ON s.task_id=t.id AND s.user_id=? WHERE t.audience='all' OR t.audience=? OR t.target_user=? ORDER BY t.id DESC LIMIT 100",(uid,u["rank"] or "user",uid)).fetchall()
+        return 200,{"ok":True,"items":[{"id":r["id"],"title":r["title"],"body":r["body"],"status":r["status"],"date":T.fmt_date(r["created_at"])} for r in rows]}
+
+    if path == "/api/tasks/status":
+        task_id=_int(body.get("id")); status=str(body.get("status") or "")
+        if status not in ("in_progress","completed"): return 400,{"ok":False,"error":"Неверный статус"}
+        with T.db() as con:
+            exists=con.execute("SELECT id FROM agency_tasks WHERE id=? AND (audience='all' OR audience=? OR target_user=?)",(task_id,u["rank"] or "user",uid)).fetchone()
+            if not exists: return 404,{"ok":False,"error":"Задача не найдена"}
+            con.execute("INSERT INTO agency_task_status(task_id,user_id,status,updated_at) VALUES(?,?,?,?) ON CONFLICT(task_id,user_id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at",(task_id,uid,status,T.utcnow()))
+        return 200,{"ok":True}
+
     # ---- только для админов ----
     if not admin:
         return 403, {"ok": False, "error": "Нет доступа"}
+
+    if path == "/api/admin/referrals":
+        with T.db() as con:
+            rows=con.execute("SELECT r.*,u.username,u.first_name FROM agency_referrals r LEFT JOIN users u ON u.user_id=r.invited_id ORDER BY r.id DESC LIMIT 200").fetchall()
+        return 200,{"ok":True,"items":[{"id":r["id"],"inviter_id":r["inviter_id"],"invited_id":r["invited_id"],"username":r["username"] or r["first_name"] or str(r["invited_id"]),"role":r["role"],"status":r["status"],"reward":r["reward_cents"],"paid":bool(r["reward_paid"])} for r in rows]}
+
+    if path == "/api/admin/referral/start":
+        rid=_int(body.get("id"))
+        with T.db() as con:
+            r=con.execute("SELECT * FROM agency_referrals WHERE id=?",(rid,)).fetchone()
+            if not r: return 404,{"ok":False,"error":"Реферал не найден"}
+            if r["status"] in ("started_work","reward_paid"): return 409,{"ok":False,"error":"Старт уже подтверждён"}
+            con.execute("UPDATE agency_referrals SET status='started_work',started_at=? WHERE id=?",(T.utcnow(),rid))
+            _notify(con,r["inviter_id"],"Начало работы подтверждено",f"Приглашённый пользователь #{r['invited_id']} приступил к работе. Бонус ожидает начисления.","referral")
+        return 200,{"ok":True}
+
+    if path == "/api/admin/referral/pay":
+        rid=_int(body.get("id"))
+        with T.db() as con:
+            r=con.execute("SELECT * FROM agency_referrals WHERE id=?",(rid,)).fetchone()
+            if not r or r["status"]!='started_work' or r["reward_paid"]: return 409,{"ok":False,"error":"Нельзя начислить: проверьте статус или бонус уже выплачен"}
+            w=_wallet(con,r["inviter_id"]); new=w["balance_cents"]+r["reward_cents"]
+            con.execute("UPDATE agency_wallets SET balance_cents=?,updated_at=? WHERE user_id=?",(new,T.utcnow(),r["inviter_id"]))
+            con.execute("INSERT INTO agency_transactions(user_id,amount_cents,kind,reason,ref_key,balance_after_cents,created_at,created_by) VALUES(?,?,?,?,?,?,?,?)",(r["inviter_id"],r["reward_cents"],"credit",f"Реферальное вознаграждение — ${r['reward_cents']/100:.2f}",f"referral:{rid}",new,T.utcnow(),uid))
+            con.execute("UPDATE agency_referrals SET status='reward_paid',reward_paid=1 WHERE id=?",(rid,))
+            _notify(con,r["inviter_id"],"Реферальный бонус начислен",f"На баланс зачислено ${r['reward_cents']/100:.2f}.","finance")
+        await T.safe_send(bot,r["inviter_id"],f"💰 Вам начислено ${r['reward_cents']/100:.2f} за приглашённого сотрудника.")
+        return 200,{"ok":True}
+
+    if path == "/api/admin/tasks/create":
+        title=str(body.get("title") or "").strip()[:100]; desc=str(body.get("body") or "").strip()[:2000]; audience=str(body.get("audience") or "all")
+        if not title or not desc or audience not in ("all","scout","operator","model"): return 400,{"ok":False,"error":"Заполните заголовок, текст и аудиторию"}
+        with T.db() as con: cur=con.execute("INSERT INTO agency_tasks(title,body,audience,created_by,created_at) VALUES(?,?,?,?,?)",(title,desc,audience,uid,T.utcnow()))
+        return 200,{"ok":True,"id":cur.lastrowid}
+
+    if path == "/api/admin/finance/users":
+        with T.db() as con:
+            rows=con.execute("SELECT w.*,u.username,u.first_name FROM agency_wallets w LEFT JOIN users u ON u.user_id=w.user_id ORDER BY w.balance_cents DESC LIMIT 200").fetchall()
+        return 200,{"ok":True,"items":[{"user_id":r["user_id"],"username":r["username"] or r["first_name"] or str(r["user_id"]),"balance":r["balance_cents"],"reserved":r["reserved_cents"]} for r in rows]}
+
+    if path == "/api/admin/finance/adjust":
+        try: target=_int(body.get("user_id")); cents=int(round(float(body.get("amount"))*100))
+        except (ValueError,TypeError): return 400,{"ok":False,"error":"Проверьте пользователя и сумму"}
+        reason=str(body.get("reason") or "").strip()[:240]
+        if not cents or not reason: return 400,{"ok":False,"error":"Сумма и причина обязательны"}
+        with T.db() as con:
+            w=_wallet(con,target); new=w["balance_cents"]+cents
+            if new<w["reserved_cents"]: return 409,{"ok":False,"error":"Нельзя списать зарезервированные средства"}
+            con.execute("UPDATE agency_wallets SET balance_cents=?,updated_at=? WHERE user_id=?",(new,T.utcnow(),target))
+            con.execute("INSERT INTO agency_transactions(user_id,amount_cents,kind,reason,ref_key,balance_after_cents,created_at,created_by) VALUES(?,?,?,?,?,?,?,?)",(target,cents,"credit" if cents>0 else "debit",reason,f"admin:{uid}:{T.utcnow()}:{target}",new,T.utcnow(),uid))
+            _notify(con,target,"Баланс обновлён",f"{'Начислено' if cents>0 else 'Списано'} ${abs(cents)/100:.2f}. Причина: {reason}")
+        await T.safe_send(bot,target,f"💳 Баланс обновлён: {'+' if cents>0 else '-'}${abs(cents)/100:.2f}. Причина: {T.esc(reason)}")
+        return 200,{"ok":True,"balance":new}
+
+    if path == "/api/admin/withdrawals":
+        with T.db() as con: rows=con.execute("SELECT * FROM agency_withdrawals WHERE status='pending' ORDER BY id ASC LIMIT 100").fetchall()
+        return 200,{"ok":True,"items":[{"id":r["id"],"user_id":r["user_id"],"amount":r["amount_cents"],"address":r["address"],"date":T.fmt_dt(r["created_at"])} for r in rows]}
+
+    if path == "/api/admin/withdrawal/decide":
+        wid=_int(body.get("id")); action=str(body.get("action") or ""); txid=str(body.get("txid") or "").strip()
+        if action not in ("approve","reject") or (action=="approve" and not txid): return 400,{"ok":False,"error":"Для выплаты нужен TXID"}
+        with T.db() as con:
+            r=con.execute("SELECT * FROM agency_withdrawals WHERE id=? AND status='pending'",(wid,)).fetchone()
+            if not r: return 404,{"ok":False,"error":"Заявка уже обработана"}
+            w=_wallet(con,r["user_id"])
+            if action=="approve":
+                con.execute("UPDATE agency_wallets SET balance_cents=balance_cents-?,reserved_cents=reserved_cents-?,updated_at=? WHERE user_id=?",(r["amount_cents"],r["amount_cents"],T.utcnow(),r["user_id"]))
+                con.execute("UPDATE agency_withdrawals SET status='paid',txid=?,reviewed_by=?,reviewed_at=? WHERE id=?",(txid,uid,T.utcnow(),wid))
+                _notify(con,r["user_id"],"Вывод выполнен",f"Выплата ${r['amount_cents']/100:.2f}. TXID: {txid}")
+            else:
+                con.execute("UPDATE agency_wallets SET reserved_cents=MAX(0,reserved_cents-?),updated_at=? WHERE user_id=?",(r["amount_cents"],T.utcnow(),r["user_id"]))
+                con.execute("UPDATE agency_withdrawals SET status='rejected',reviewed_by=?,reviewed_at=? WHERE id=?",(uid,T.utcnow(),wid))
+                _notify(con,r["user_id"],"Вывод отклонён",f"Резерв ${r['amount_cents']/100:.2f} возвращён в доступный баланс.")
+        await T.safe_send(bot,r["user_id"],"Заявка на вывод выполнена." if action=="approve" else "Заявка на вывод отклонена. Средства возвращены в доступный баланс.")
+        return 200,{"ok":True}
 
     if path == "/api/admin/profiles":
         with T.db() as con:
@@ -276,6 +446,9 @@ async def handle_api(bot, path: str, tg_user: dict, body: dict):
             if current and not current["rank"]:
                 T.set_rank(p["user_id"], p["kind"], 1)
                 if p["team_id"]: T.add_member(p["user_id"], p["team_id"], via_ref=0, added_by=p["added_by"] or uid)
+        if p["user_id"] and action == "approve":
+            with T.db() as con:
+                con.execute("UPDATE agency_referrals SET status='approved' WHERE invited_id=? AND status='registered'", (p["user_id"],))
         if p["user_id"]:
             await T.safe_send(bot, p["user_id"], "✅ Анкета одобрена. Роль активирована." if action=="approve" else "❌ Анкета отклонена. Свяжитесь с пригласившим.", reply_markup=T.main_menu_kb(p["user_id"]))
         return 200, {"ok": True}
@@ -347,13 +520,29 @@ async def handle_api(bot, path: str, tg_user: dict, body: dict):
         if mode not in ("all", "group", "bot"):
             return 400, {"ok": False, "error": "Неверный режим"}
         res = await T.send_model_alert(bot, target["user_id"], str(body.get("comment") or "")[:200], mode, uid)
-        return 200, {"ok": "error" not in res, "result": res}
+        # $6 за подтверждённую администратором операцию «новая модель».
+        # Ключ model-alert:<id> делает начисление идемпотентным.
+        delivered = res.get("group") == "ok" or int(res.get("sent", 0)) > 0
+        if delivered:
+            with T.db() as con:
+                alert=con.execute("SELECT id FROM model_alerts WHERE scout_id=? ORDER BY id DESC LIMIT 1",(target["user_id"],)).fetchone()
+                if alert:
+                    key=f"model-alert:{alert['id']}"
+                    w=_wallet(con,target["user_id"])
+                    new=w["balance_cents"]+600
+                    cur=con.execute("INSERT OR IGNORE INTO agency_transactions(user_id,amount_cents,kind,reason,ref_key,balance_after_cents,created_at,created_by) VALUES(?,?,?,?,?,?,?,?)",(target["user_id"],600,"credit","Новая модель — $6",key,new,T.utcnow(),uid))
+                    if cur.rowcount:
+                        con.execute("UPDATE agency_wallets SET balance_cents=?,updated_at=? WHERE user_id=?",(new,T.utcnow(),target["user_id"]))
+                        _notify(con,target["user_id"],"Начислено $6", "Подтверждена операция о новой модели. Средства зачислены на баланс.","finance")
+                        await T.safe_send(bot,target["user_id"],"💳 Вам начислено $6.00 за подтверждённую операцию о новой модели.")
+        return 200, {"ok": "error" not in res, "result": res, "reward_credited": bool(delivered)}
 
     return 404, {"ok": False, "error": "Не найдено"}
 
 
 # -------------------- aiohttp --------------------
 async def start_webapp(bot, host: str, port: int):
+    init_agency_extensions()
     from aiohttp import web  # aiohttp ставится вместе с aiogram
 
     @web.middleware
