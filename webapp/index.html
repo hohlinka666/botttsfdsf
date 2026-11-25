@@ -8,16 +8,13 @@
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{
-  --bg:var(--tg-theme-bg-color,#ffffff); --text:var(--tg-theme-text-color,#17181a);
-  --hint:var(--tg-theme-hint-color,#7b8088); --link:var(--tg-theme-link-color,#2a7de1);
-  --btn:var(--tg-theme-button-color,#2a7de1); --btn-t:var(--tg-theme-button-text-color,#fff);
-  --card:var(--tg-theme-secondary-bg-color,#f2f3f5); --line:rgba(127,127,127,.22);
+  --bg:#050505; --text:#F3F0EA;
+  --hint:#858585; --link:#D71936;
+  --btn:#D71936; --btn-t:#fff;
+  --card:#101010; --line:rgba(243,240,234,.13);
   --ok:#2e9d5b; --bad:#d6453d; --wait:#c78a12; --r:14px;
 }
-@media (prefers-color-scheme:dark){:root{
-  --bg:var(--tg-theme-bg-color,#17181b); --text:var(--tg-theme-text-color,#f1f2f4);
-  --card:var(--tg-theme-secondary-bg-color,#222428); --hint:var(--tg-theme-hint-color,#8b9098);
-}}
+
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 -apple-system,"Segoe UI",Roboto,sans-serif}
 body{padding:14px 16px calc(84px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto}
@@ -33,7 +30,7 @@ p{margin:0 0 8px}
 .grid .card{margin:0}
 .stat b{display:block;font-size:24px;line-height:1.1} .stat span{font-size:12px;color:var(--hint)}
 .hero{display:flex;gap:12px;align-items:center;margin:2px 0 14px}
-.ava{width:52px;height:52px;border-radius:50%;background:var(--btn);color:var(--btn-t);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;flex:none}
+.ava{display:none}
 .ava.sm{width:36px;height:36px;font-size:15px;background:rgba(127,127,127,.2);color:var(--text)}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
 .chip{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;background:rgba(127,127,127,.18)}
@@ -79,7 +76,7 @@ details.card summary::-webkit-details-marker{display:none}
 .linkbox{background:var(--bg);border:1px dashed var(--line);border-radius:10px;padding:10px;font-size:13px;word-break:break-all;margin-top:8px}
 nav{position:fixed;left:0;right:0;bottom:0;display:flex;background:var(--bg);border-top:1px solid var(--line);padding:6px 6px calc(6px + env(safe-area-inset-bottom));z-index:10}
 nav button{flex:1;background:none;color:var(--hint);padding:4px 2px;font-size:11px;font-weight:600;border-radius:8px;position:relative;min-height:48px}
-nav button i{display:block;font-style:normal;font-size:20px;margin-bottom:1px} nav button.on{color:var(--btn)}
+nav button i{display:block;font-style:normal;font-size:20px;margin-bottom:1px} nav button.on{color:var(--btn)} nav button.plusnav{background:#D71936;color:white;border-radius:50%;max-width:52px;min-height:48px;margin:0 8px;font-size:24px;font-weight:800} nav button.plusnav i{font-size:25px;margin:0}
 nav button em{position:absolute;top:0;left:55%;background:var(--bad);color:#fff;font-style:normal;font-size:10px;border-radius:9px;padding:0 5px;line-height:15px}
 .toast{position:fixed;left:16px;right:16px;bottom:calc(88px + env(safe-area-inset-bottom));background:#222;color:#fff;padding:11px 14px;border-radius:12px;text-align:center;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;z-index:50;max-width:608px;margin:0 auto}
 .toast.show{opacity:1;transform:none}
@@ -141,17 +138,10 @@ const fmtH = h => String(Math.round(h * 100) / 100);
 const empty = (ico, t, sub) => `<div class="empty"><b>${ico}</b>${esc(t)}${sub ? `<div class="small" style="margin-top:4px">${esc(sub)}</div>` : ''}</div>`;
 
 /* ---------- каркас ---------- */
-function tabs() {
-  const m = me.me, t = [['home', '🏠', 'Главная']];
-  if (m.can_report) t.push(['report', '📝', 'Отчёт']);
-  if (m.is_member) t.push(['team', '👥', 'Команда'], ['top', '🏆', 'Рейтинг']);
-  if (m.is_admin) t.push(['admin', '🛠', 'Админ']);
-  return t;
-}
+function tabs() { return [['home','⌂','HOME'],['team','▤','TEAM'],['plus','+',''],['history','↕','HISTORY'],['profile','○','PROFILE']]; }
 function renderNav() {
   const nav = $('#nav'); nav.classList.remove('hidden');
-  const badgeN = me.pending + me.pending_teams;
-  nav.innerHTML = tabs().map(([k, i, t]) => `<button data-act="tab" data-tab="${k}" class="${tab === k ? 'on' : ''}"><i>${i}</i>${t}${k === 'admin' && badgeN ? `<em>${badgeN}</em>` : ''}</button>`).join('');
+  nav.innerHTML = tabs().map(([k, i, t]) => `<button data-act="tab" data-tab="${k}" class="${tab === k ? 'on' : ''} ${k==='plus'?'plusnav':''}"><i>${i}</i>${t}</button>`).join('');
 }
 async function load() { const j = await api('/api/me'); if (j.ok) { me = j; return true; } fatal(j); return false; }
 async function refreshMe() { const j = await api('/api/me'); if (j.ok) { me = j; renderNav(); } return j.ok; }
@@ -169,7 +159,7 @@ async function render(keepScroll) {
   renderNav();
   if (!keepScroll) $('#app').innerHTML = SKEL;
   let out;
-  try { out = await ({home: viewHome, report: viewReport, team: viewTeam, top: viewTop, admin: viewAdmin}[tab])(); }
+  try { out = await ({home: viewHome, report: viewReport, team: viewTeam, top: viewTop, admin: viewAdmin, plus:viewPlus, history:viewHistory, profile:viewProfile, finance:viewFinance, referrals:viewReferrals, notifications:viewNotifications, tasks:viewTasks}[tab] || viewHome)(); }
   catch (e) { console.error(e); out = {html: `<div class="center"><h1>⚠️</h1><p>Что-то пошло не так</p><button data-act="boot">Повторить</button></div>`}; }
   if (my !== rt) return;
   $('#app').innerHTML = out.html;
@@ -200,7 +190,8 @@ async function viewHome() {
   const chips = [m.rank ? chip(m.rank) : (m.is_admin ? chip('🛠 Администратор') : chip('Без ранга', 'mute'))];
   if (m.team) chips.push(chip('👥 ' + m.team));
   m.leads.forEach(x => chips.push(chip('👑 ' + x)));
-  let h = `<div class="hero"><div class="ava">${esc(initial(m.name))}</div><div class="col"><h1>${esc(m.name)}</h1><div class="chips">${chips.join('')}</div></div></div>`;
+  let h = `<div class="row" style="margin:4px 0 20px"><div class="col"><div class="muted small" style="letter-spacing:.18em">VUITTON AGENCY</div><h1 style="font-size:26px;letter-spacing:.04em">MEMBER DASHBOARD</h1><div class="chips">${chips.join('')}</div></div><button class="ghost sm" data-act="tab" data-tab="notifications">◌</button></div>`;
+  const fin=await api('/api/finance'); h += `<div class="card" style="background:#101010;border:1px solid var(--line);padding:20px"><div class="muted small" style="letter-spacing:.15em">TOTAL BALANCE</div><div style="font-size:38px;font-weight:750;margin:5px 0">$${((fin.balance||0)/100).toFixed(2)}</div><div class="row muted small"><span>Available $${((fin.available||0)/100).toFixed(2)}</span><span>Reserved $${((fin.reserved||0)/100).toFixed(2)}</span></div><button class="full" data-act="tab" data-tab="finance">WITHDRAW FUNDS</button></div><div class="grid">${stat(w.models,'MODELS · 7 DAYS')}${stat(w.scouts+w.operators,'TEAM MEMBERS · 7 DAYS')}${stat(a.models,'MODELS · ALL TIME')}${stat(a.scouts+a.operators,'TEAM · ALL TIME')}</div>`;
 
   if (!m.is_member) {
     h += `<div class="card"><b>Вы пока не в команде</b><p class="muted small" style="margin-top:6px">Чтобы сдавать отчёты и видеть рейтинг, вступите в команду: получите ссылку-приглашение у наставника или подайте заявку в боте.</p></div>`;
@@ -457,8 +448,20 @@ async function reviewProfile(el) { const c=el.closest('[data-profile]'); const r
 async function reviewRole(el) { const c=el.closest('[data-role-req]'); const r=await api('/api/admin/role_request/decide',{id:+c.dataset.roleReq,action:el.dataset.a}); if(!r.ok) return toast(r.error); toast('Заявка обработана'); render(true); }
 
 /* ---------- действия (делегирование кликов) ---------- */
+async function viewPlus(){return {html:`<div class="muted small" style="letter-spacing:.18em">VUITTON AGENCY</div><h1>GROW YOUR NETWORK</h1><p class="muted small">Выберите, кого хотите пригласить.</p><div class="card"><b>INVITE A SCOUT</b><p class="muted small">$10 после подтверждённого начала работы.</p><button class="full" data-act="create-ref" data-role="scout">GENERATE INVITE LINK</button></div><div class="card"><b>INVITE AN OPERATOR</b><p class="muted small">$50 после подтверждённого начала работы.</p><button class="full" data-act="create-ref" data-role="operator">GENERATE INVITE LINK</button></div><div class="card"><b>INVITE A MODEL</b><p class="muted small">Направьте кандидата напрямую руководителю.</p><button class="full" data-act="chat" data-url="https://t.me/vuittonceo">APPLY NOW ↗</button></div>`};}
+async function viewHistory(){const j=await api('/api/finance');return {html:`<div class="muted small">VUITTON / ACCOUNT</div><h1>HISTORY</h1>${(j.transactions||[]).map(x=>`<div class="card row"><div class="col"><b>${esc(x.reason)}</b><span class="muted small">${esc(x.date)} · ${esc(x.status)}</span></div><b style="color:${x.amount>=0?'#F3F0EA':'#D71936'}">${x.amount>=0?'+':'−'}$${(Math.abs(x.amount)/100).toFixed(2)}</b></div>`).join('')||empty('—','No transactions yet')}`};}
+async function viewProfile(){const j=await api('/api/profile');const p=j.profile||{};return {html:`<div class="muted small">VUITTON / MEMBER</div><h1>PROFILE</h1><div class="card"><div class="muted small">TELEGRAM ID</div><b>${me.me.id}</b><div class="muted small" style="margin-top:12px">NAME</div><b>${esc(me.me.name)}</b><div class="muted small" style="margin-top:12px">ROLE</div><b>${esc(p.kind||me.me.rank||'Member')}</b><div class="muted small" style="margin-top:12px">STATUS</div><b>${esc(p.status||'active')}</b></div><div class="actions"><button class="ghost" data-act="tab" data-tab="referrals">REFERRALS</button><button class="ghost" data-act="tab" data-tab="notifications">NOTIFICATIONS</button><button class="ghost" data-act="tab" data-tab="tasks">TASK CENTER</button><button class="ghost" data-act="tab" data-tab="finance">FINANCE</button>${me.me.is_admin?'<button data-act="tab" data-tab="admin">ADMIN PANEL</button>':''}</div>`};}
+async function viewFinance(){const j=await api('/api/finance');return {html:`<div class="muted small">VUITTON / FINANCE</div><h1>FINANCE</h1><div class="card"><div class="muted small">AVAILABLE BALANCE</div><div style="font-size:34px;font-weight:750">$${((j.available||0)/100).toFixed(2)}</div><div class="muted small">Total $${((j.balance||0)/100).toFixed(2)} · Reserved $${((j.reserved||0)/100).toFixed(2)}</div></div><h2>REQUEST WITHDRAWAL · USDT TRC20</h2><label>Amount, USD</label><input id="wd-amount" type="number" min="1" step="0.01" placeholder="100.00"><label>TRC20 wallet address</label><input id="wd-address" placeholder="T..."><button class="full" data-act="withdraw">SUBMIT REQUEST</button><h2>WITHDRAWAL HISTORY</h2>${(j.withdrawals||[]).map(x=>`<div class="card"><div class="row"><b>$${(x.amount/100).toFixed(2)}</b><span class="badge ${x.status}">${esc(x.status)}</span></div><div class="muted small">${esc(x.date)} · ${esc(x.address)}</div>${x.txid?`<div class="small">TXID: ${esc(x.txid)}</div>`:''}</div>`).join('')||empty('—','No withdrawals')}`};}
+async function viewReferrals(){const j=await api('/api/referrals');return {html:`<div class="muted small">VUITTON / GROWTH</div><h1>REFERRALS</h1>${(j.links||[]).map(x=>`<div class="card"><b>${esc(x.role.toUpperCase())}</b><div class="linkbox">${esc(x.url)}</div><button class="ghost full" data-act="copy" data-text="${esc(x.url)}">COPY LINK</button></div>`).join('')||empty('＋','No active links')}<h2>INVITED MEMBERS</h2>${(j.referrals||[]).map(x=>`<div class="card row"><div class="col"><b>${esc(x.role)} · #${x.user_id}</b><span class="muted small">${esc(x.date)} · ${esc(x.status)}</span></div><b>$${(x.reward/100).toFixed(2)}</b></div>`).join('')||empty('—','No referrals yet')}`};}
+async function viewNotifications(){const j=await api('/api/notifications');return {html:`<div class="muted small">VUITTON / ACTIVITY</div><h1>NOTIFICATIONS</h1>${(j.items||[]).map(x=>`<div class="card" data-notif="${x.id}"><div class="row"><b>${esc(x.title)}</b>${x.read?'':'<span class="badge pending">NEW</span>'}</div><p class="small">${esc(x.body)}</p><div class="muted small">${esc(x.date)}</div>${x.read?'':`<button class="ghost sm" data-act="read-notif" data-id="${x.id}">MARK READ</button>`}</div>`).join('')||empty('—','No notifications')}`};}
+async function viewTasks(){const j=await api('/api/tasks');return {html:`<div class="muted small">VUITTON / WORKSPACE</div><h1>TASK CENTER</h1>${(j.items||[]).map(x=>`<div class="card"><div class="row"><b>${esc(x.title)}</b><span class="badge ${x.status}">${esc(x.status)}</span></div><p class="small">${esc(x.body)}</p><div class="muted small">${esc(x.date)}</div><div class="btns"><button class="ghost sm" data-act="task-status" data-id="${x.id}" data-status="in_progress">IN PROGRESS</button><button class="sm" data-act="task-status" data-id="${x.id}" data-status="completed">COMPLETED</button></div></div>`).join('')||empty('—','No tasks assigned')}`};}
+
 const actions = {
   boot: () => boot(),
+  'create-ref': async el => { const r=await api('/api/referrals/create',{role:el.dataset.role}); if(!r.ok)return toast(r.error); if(!r.url)return toast('Ссылка недоступна: проверьте username бота'); await copyText(r.url); },
+  withdraw: async () => { const r=await api('/api/withdraw',{amount:$('#wd-amount').value,address:$('#wd-address').value}); if(!r.ok)return toast(r.error); toast('Заявка создана, средства зарезервированы'); render(true); },
+  'read-notif': async el => { const r=await api('/api/notifications/read',{id:+el.dataset.id}); if(r.ok)render(true); },
+  'task-status': async el => { const r=await api('/api/tasks/status',{id:+el.dataset.id,status:el.dataset.status}); if(!r.ok)return toast(r.error); toast('Статус обновлён'); render(true); },
   tab: el => go(el.dataset.tab),
   'close-sheet': () => closeSheet(),
   'add-worker': el => sheetAddWorker(el.dataset.team),
